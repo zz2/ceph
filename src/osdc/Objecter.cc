@@ -2506,7 +2506,7 @@ Objecter::RequestStateHook::RequestStateHook(Objecter *objecter) :
 bool Objecter::RequestStateHook::call(std::string command, cmdmap_t& cmdmap,
 				      std::string format, bufferlist& out)
 {
-  Formatter *f = new_formatter(format);
+  Formatter *f = Formatter::create(format);
   m_objecter->client_lock.Lock();
   m_objecter->dump_requests(f);
   m_objecter->client_lock.Unlock();

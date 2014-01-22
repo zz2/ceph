@@ -171,7 +171,7 @@ public:
 void CephContext::do_command(std::string command, cmdmap_t& cmdmap,
 			     std::string format, bufferlist *out)
 {
-  Formatter *f = new_formatter(format);
+  Formatter *f = Formatter::create(format);
   stringstream ss;
   for (cmdmap_t::iterator it = cmdmap.begin(); it != cmdmap.end(); ++it) {
     if (it->first != "prefix") {

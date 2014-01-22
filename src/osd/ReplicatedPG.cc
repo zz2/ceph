@@ -492,10 +492,10 @@ int ReplicatedPG::do_command(cmdmap_t cmdmap, ostream& ss,
   string format;
 
   cmd_getval(cct, cmdmap, "format", format);
-  boost::scoped_ptr<Formatter> f(new_formatter(format));
+  boost::scoped_ptr<Formatter> f(Formatter::create(format));
   // demand that we have a formatter
   if (!f)
-    f.reset(new_formatter("json"));
+    f.reset(Formatter::create("json"));
 
   string command;
   cmd_getval(cct, cmdmap, "cmd", command);

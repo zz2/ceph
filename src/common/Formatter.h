@@ -63,9 +63,9 @@ class Formatter {
   virtual void dump_string_with_attrs(const char *name, std::string s, const FormatterAttrs& attrs) {
     dump_string(name, s);
   }
-};
 
-Formatter *new_formatter(const std::string type);
+  static Formatter *create(const std::string type);
+};
 
 class JSONFormatter : public Formatter {
  public:

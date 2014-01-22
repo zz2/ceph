@@ -2036,7 +2036,7 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
 
   string format;
   cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
-  boost::scoped_ptr<Formatter> f(new_formatter(format));
+  boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   if (prefix == "osd stat") {
     osdmap.print_summary(f.get(), ds);
@@ -2158,7 +2158,7 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
     }
     string format;
     cmd_getval(g_ceph_context, cmdmap, "format", format, string("json-pretty"));
-    boost::scoped_ptr<Formatter> f(new_formatter(format));
+    boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
     f->open_object_section("osd_location");
     f->dump_int("osd", osd);
@@ -2180,7 +2180,7 @@ bool OSDMonitor::preprocess_command(MMonCommand *m)
     }
     string format;
     cmd_getval(g_ceph_context, cmdmap, "format", format, string("json-pretty"));
-    boost::scoped_ptr<Formatter> f(new_formatter(format));
+    boost::scoped_ptr<Formatter> f(Formatter::create(format));
     f->open_object_section("osd_metadata");
     r = dump_osd_metadata(osd, f.get(), &ss);
     if (r < 0)
@@ -2479,9 +2479,9 @@ stats_out:
 	     prefix == "osd crush rule ls") {
     string format;
     cmd_getval(g_ceph_context, cmdmap, "format", format, string("json-pretty"));
-    Formatter *fp = new_formatter(format);
+    Formatter *fp = Formatter::create(format);
     if (!fp)
-      fp = new_formatter("json-pretty");
+      fp = Formatter::create("json-pretty");
     boost::scoped_ptr<Formatter> f(fp);
     f->open_array_section("rules");
     osdmap.crush->list_rules(f.get());
@@ -2493,9 +2493,9 @@ stats_out:
   } else if (prefix == "osd crush rule dump") {
     string format;
     cmd_getval(g_ceph_context, cmdmap, "format", format, string("json-pretty"));
-    Formatter *fp = new_formatter(format);
+    Formatter *fp = Formatter::create(format);
     if (!fp)
-      fp = new_formatter("json-pretty");
+      fp = Formatter::create("json-pretty");
     boost::scoped_ptr<Formatter> f(fp);
     f->open_array_section("rules");
     osdmap.crush->dump_rules(f.get());
@@ -2507,9 +2507,9 @@ stats_out:
   } else if (prefix == "osd crush dump") {
     string format;
     cmd_getval(g_ceph_context, cmdmap, "format", format, string("json-pretty"));
-    Formatter *fp = new_formatter(format);
+    Formatter *fp = Formatter::create(format);
     if (!fp)
-      fp = new_formatter("json-pretty");
+      fp = Formatter::create("json-pretty");
     boost::scoped_ptr<Formatter> f(fp);
     f->open_object_section("crush_map");
     osdmap.crush->dump(f.get());
@@ -2521,9 +2521,9 @@ stats_out:
   } else if (prefix == "osd crush show-tunables") {
     string format;
     cmd_getval(g_ceph_context, cmdmap, "format", format, string("json-pretty"));
-    Formatter *fp = new_formatter(format);
+    Formatter *fp = Formatter::create(format);
     if (!fp)
-      fp = new_formatter("json-pretty");
+      fp = Formatter::create("json-pretty");
     boost::scoped_ptr<Formatter> f(fp);
     f->open_object_section("crush_map_tunables");
     osdmap.crush->dump_tunables(f.get());
@@ -3047,7 +3047,7 @@ bool OSDMonitor::prepare_command(MMonCommand *m)
 
   string format;
   cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
-  boost::scoped_ptr<Formatter> f(new_formatter(format));
+  boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   MonSession *session = m->get_session();
   if (!session) {

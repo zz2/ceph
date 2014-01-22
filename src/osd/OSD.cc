@@ -908,7 +908,7 @@ bool OSD::asok_command(string command, cmdmap_t& cmdmap, string format,
 {
   if (format == "")
     format = "json-pretty";
-  Formatter *f = new_formatter(format);
+  Formatter *f = Formatter::create(format);
   if (command == "dump_ops_in_flight") {
     op_tracker.dump_ops_in_flight(f);
   } else if (command == "dump_historic_ops") {
@@ -4031,7 +4031,7 @@ void OSD::do_command(Connection *con, tid_t tid, vector<string>& cmd, bufferlist
   }
 
   cmd_getval(cct, cmdmap, "format", format);
-  f.reset(new_formatter(format));
+  f.reset(Formatter::create(format));
 
   if (prefix == "version") {
     if (f) {

@@ -257,7 +257,7 @@ void Monitor::do_admin_command(string command, cmdmap_t& cmdmap, string format,
 {
   Mutex::Locker l(lock);
 
-  boost::scoped_ptr<Formatter> f(new_formatter(format));
+  boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   if (command == "mon_status") {
     _mon_status(f.get(), ss);
@@ -2068,7 +2068,7 @@ void Monitor::handle_command(MMonCommand *m)
   cmd_getval(g_ceph_context, cmdmap, "prefix", prefix);
   if (prefix == "get_command_descriptions") {
     bufferlist rdata;
-    Formatter *f = new_formatter("json");
+    Formatter *f = Formatter::create("json");
     format_command_descriptions(leader_supported_mon_commands,
 				leader_supported_mon_commands_size, f, &rdata);
     delete f;
@@ -2083,7 +2083,7 @@ void Monitor::handle_command(MMonCommand *m)
 
   string format;
   cmd_getval(g_ceph_context, cmdmap, "format", format, string("plain"));
-  boost::scoped_ptr<Formatter> f(new_formatter(format));
+  boost::scoped_ptr<Formatter> f(Formatter::create(format));
 
   get_str_vec(prefix, fullcmd);
   module = fullcmd[0];
@@ -2257,7 +2257,7 @@ void Monitor::handle_command(MMonCommand *m)
 
     // this must be formatted, in its current form
     if (!f)
-      f.reset(new_formatter("json-pretty"));
+      f.reset(Formatter::create("json-pretty"));
     f->open_object_section("report");
     f->dump_string("version", ceph_version_to_str());
     f->dump_string("commit", git_version_to_str());
