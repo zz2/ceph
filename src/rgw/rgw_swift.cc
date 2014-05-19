@@ -181,6 +181,8 @@ int KeystoneToken::parse(CephContext *cct, bufferlist& bl)
 
   expiration = timegm(&t);
 
+  ldout(cct, 20) << __FILE__ << ":" << __LINE__ << ": parsed token expiration=" << expiration << dendl;
+
   JSONObj *tenant = token->find_obj("tenant");
   if (!tenant) {
     ldout(cct, 0) << "token response is missing tenant section" << dendl;
@@ -230,6 +232,7 @@ bool RGWKeystoneTokenCache::find(const string& token_id, KeystoneToken& token)
   map<string, token_entry>::iterator iter = tokens.find(token_id);
   if (iter == tokens.end()) {
     lock.Unlock();
+    ldout(cct, 20) << __FILE__ << ":" << __LINE__ << ": could not find token id in cache: " << token_id << dendl;
     if (perfcounter) perfcounter->inc(l_rgw_keystone_token_cache_miss);
     return false;
   }
@@ -238,6 +241,7 @@ bool RGWKeystoneTokenCache::find(const string& token_id, KeystoneToken& token)
   tokens_lru.erase(entry.lru_iter);
 
   if (entry.token.expired()) {
+    ldout(cct, 20) << __FILE__ << ":" << __LINE__ << ": found token_id: " << token_id << ", but expired" << " now=" << ceph_clock_now(NULL) << " expiration=" << entry.token.expiration << dendl;
     tokens.erase(iter);
     lock.Unlock();
     if (perfcounter) perfcounter->inc(l_rgw_keystone_token_cache_hit);
@@ -257,6 +261,7 @@ bool RGWKeystoneTokenCache::find(const string& token_id, KeystoneToken& token)
 void RGWKeystoneTokenCache::add(const string& token_id, KeystoneToken& token)
 {
   lock.Lock();
+  ldout(cct, 20) << __FILE__ << ":" << __LINE__ << ": token cache: adding token " << token_id << " expiration=" << token.expiration << dendl;
   map<string, token_entry>::iterator iter = tokens.find(token_id);
   if (iter != tokens.end()) {
     token_entry& e = iter->second;
