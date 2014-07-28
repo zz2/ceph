@@ -12,6 +12,13 @@ if [ -d $BINARY_OUTPUT ] ; then
     rm -rf $BINARY_OUTPUT
 fi
 
+# This tool is meant to operate on an offline filesystem: bring it down
+ceph mds cluster_down
+mds_gids=`ceph mds dump | grep up: | while read line ; do echo $line | awk '{print substr($1, 0, length($1)-1);}' ; done`
+for mds_gid in $mds_gids ; do
+  ceph mds fail $mds_gid
+done
+
 # Check that the import/export stuff really works as expected
 # first because it's used as the reset method between
 # following checks.
