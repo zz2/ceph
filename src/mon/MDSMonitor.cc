@@ -319,6 +319,42 @@ bool MDSMonitor::preprocess_beacon(MMDSBeacon *m)
     return false;  // need to update map
   }
 
+  // Comparing known daemon health with m->get_health()
+  // and return false (i.e. require proposal) if they
+  // do not match, to update our stored
+  {
+    bool health_diff = false;
+    bufferlist bl;
+    mon->store->get(MDS_HEALTH_PREFIX, stringify(gid), bl);
+    if (!bl.length()) {
+      dout(20) << __func__ << " initial health status for gid " << gid << dendl;
+      health_diff = true;
+    } else {
+      MDSHealth old_health;
+      bufferlist::iterator bl_i = bl.begin();
+      old_health.decode(bl_i);
+      // Compare previous and current health status
+      MDSHealth const &new_health = m->get_health();
+      std::set<mds_metric_t> old_metrics;
+      std::set<mds_metric_t> new_metrics;
+
+      for (std::list<MDSHealthMetric>::const_iterator i = old_health.metrics.begin(); i != old_health.metrics.end(); ++i) {
+        old_metrics.insert(i->type);
+      }
+      for (std::list<MDSHealthMetric>::const_iterator i = new_health.metrics.begin(); i != new_health.metrics.end(); ++i) {
+        new_metrics.insert(i->type);
+      }
+
+      if (old_metrics != new_metrics) {
+        health_diff = true;
+      }
+    }
+    if (health_diff) {
+      dout(20) << __func__ << " health metrics for gid " << gid << " were updated" << dendl;
+      return false;
+    }
+  }
+
  ignore:
   // note time and reply
   _note_beacon(m);
