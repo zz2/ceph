@@ -49,7 +49,8 @@ class LogSegment;
 class SimpleLock;
 class ScatterLock;
 class LocalLock;
-class MDCache;
+
+#include "MDCache.h"  // Full header instead of forward-declare to get MDRequestRef typedef
 
 #include "SimpleLock.h"
 
@@ -193,6 +194,8 @@ public:
   void kick_issue_caps(CInode *in, client_t client, ceph_seq_t seq);
 
   void remove_client_cap(CInode *in, client_t client);
+
+  void get_late_cap_releases(std::list<const Capability*> *late_caps) const;
 
  protected:
   void adjust_cap_wanted(Capability *cap, int wanted, int issue_seq);

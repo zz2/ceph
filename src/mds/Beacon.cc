@@ -15,11 +15,13 @@
 
 #include "common/dout.h"
 #include "common/HeartbeatMap.h"
+#include "include/stringify.h"
 
 #include "messages/MMDSBeacon.h"
 #include "mon/MonClient.h"
 #include "mds/MDS.h"
 #include "mds/MDLog.h"
+#include "mds/Locker.h"
 
 #include "Beacon.h"
 
@@ -257,6 +259,22 @@ void Beacon::notify_health(MDS const *mds)
     MDSHealthMetric m(MDS_HEALTH_TRIM, HEALTH_WARN, oss.str());
     m.metadata["num_segments"] = mds->mdlog->get_num_segments();
     m.metadata["max_segments"] = g_conf->mds_log_max_segments;
+    health.metrics.push_back(m);
+  }
+
+  std::list<const Capability*> late_caps;
+  mds->locker->get_late_cap_releases(&late_caps);
+  std::set<client_t> late_clients;
+  for (std::list<const Capability*>::iterator i =late_caps.begin(); i != late_caps.end(); ++i) {
+    const Capability *cap = *i;
+    late_clients.insert(cap->get_client());
+  }
+
+  for (std::set<client_t>::iterator i = late_clients.begin(); i != late_clients.end(); ++i) {
+    std::ostringstream oss;
+    oss << "client." << *i << " failing to respond to capability release";
+    MDSHealthMetric m(MDS_HEALTH_CLIENT_LATE_RELEASE, HEALTH_WARN, oss.str());
+    m.metadata["client_id"] = stringify(i->v);
     health.metrics.push_back(m);
   }
 
