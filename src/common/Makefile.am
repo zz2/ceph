@@ -209,7 +209,8 @@ noinst_HEADERS += \
 	common/module.h \
 	common/Continuation.h \
 	common/Readahead.h \
-	common/ContextCompletion.h
+	common/ContextCompletion.h \
+	common/bit_vector.hpp
 
 noinst_LTLIBRARIES += libcommon.la
 
