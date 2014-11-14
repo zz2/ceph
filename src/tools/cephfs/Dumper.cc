@@ -189,12 +189,14 @@ int Dumper::undump(const char *dump_file)
   if (trimmed_pos > start) {
     derr << std::hex << "Invalid header (trimmed 0x" << trimmed_pos
       << " > expire 0x" << start << std::dec << dendl;
+    VOID_TEMP_FAILURE_RETRY(::close(fd));
     return -EINVAL;
   }
 
   if (start > write_pos) {
     derr << std::hex << "Invalid header (expire 0x" << start
       << " > write 0x" << write_pos << std::dec << dendl;
+    VOID_TEMP_FAILURE_RETRY(::close(fd));
     return -EINVAL;
   }
 
@@ -231,6 +233,7 @@ int Dumper::undump(const char *dump_file)
   r = header_cond.wait();
   if (r != 0) {
     derr << "Failed to write header: " << cpp_strerror(r) << dendl;
+    VOID_TEMP_FAILURE_RETRY(::close(fd));
     return r;
   }
 
