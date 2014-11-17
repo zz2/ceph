@@ -448,6 +448,28 @@ inline void decode(std::set<T>& s, bufferlist::iterator& p)
   }
 }
 
+// multiset
+template<class T>
+inline void encode(const std::multiset<T>& s, bufferlist& bl)
+{
+  __u32 n = (__u32)(s.size());
+  encode(n, bl);
+  for (typename std::multiset<T>::const_iterator p = s.begin(); p != s.end(); ++p)
+    encode(*p, bl);
+}
+template<class T>
+inline void decode(std::multiset<T>& s, bufferlist::iterator& p)
+{
+  __u32 n;
+  decode(n, p);
+  s.clear();
+  while (n--) {
+    T v;
+    decode(v, p);
+    s.insert(v);
+  }
+}
+
 // vector (pointers)
 /*template<class T>
 inline void encode(const std::vector<T*>& v, bufferlist& bl)
@@ -735,14 +757,14 @@ inline void decode(std::deque<T>& ls, bufferlist::iterator& p)
  */
 #define ENCODE_START(v, compat, bl)			     \
   __u8 struct_v = v, struct_compat = compat;		     \
-  ::encode(struct_v, bl);				     \
-  ::encode(struct_compat, bl);				     \
-  buffer::list::iterator struct_compat_it = bl.end();	     \
+  ::encode(struct_v, (bl));				     \
+  ::encode(struct_compat, (bl));			     \
+  buffer::list::iterator struct_compat_it = (bl).end();	     \
   struct_compat_it.advance(-1);				     \
   ceph_le32 struct_len;				             \
   struct_len = 0;                                            \
-  ::encode(struct_len, bl);				     \
-  buffer::list::iterator struct_len_it = bl.end();	     \
+  ::encode(struct_len, (bl));				     \
+  buffer::list::iterator struct_len_it = (bl).end();	     \
   struct_len_it.advance(-4);				     \
   do {
 
@@ -754,7 +776,7 @@ inline void decode(std::deque<T>& ls, bufferlist::iterator& p)
  */
 #define ENCODE_FINISH_NEW_COMPAT(bl, new_struct_compat)			\
   } while (false);							\
-  struct_len = bl.length() - struct_len_it.get_off() - sizeof(struct_len); \
+  struct_len = (bl).length() - struct_len_it.get_off() - sizeof(struct_len); \
   struct_len_it.copy_in(4, (char *)&struct_len);			\
   if (new_struct_compat) {						\
     struct_compat = new_struct_compat;					\
