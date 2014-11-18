@@ -350,11 +350,12 @@ int ImageWatcher::lock() {
   ldout(m_image_ctx.cct, 20) << "acquired exclusive lock" << dendl;
   m_lock_owner_state = LOCK_OWNER_STATE_LOCKED;
 
-  r = m_image_ctx.refresh_object_map();
-  if (r < 0) {
+  r = m_image_ctx.lock_object_map();
+  if (r < 0 && r != -ENOENT) {
     unlock();
     return r;
   }
+  m_image_ctx.refresh_object_map();
 
   bufferlist bl;
   ENCODE_START(NOTIFY_VERSION, NOTIFY_VERSION, bl);
@@ -386,6 +387,7 @@ int ImageWatcher::unlock()
     return r;
   }
 
+  m_image_ctx.unlock_object_map();
   notify_released_lock();
   return 0;
 }
@@ -963,9 +965,9 @@ void ImageWatcher::reregister_watch() {
                                                &m_handle, &m_watch_ctx);
       if (m_watch_error < 0) {
         lderr(m_image_ctx.cct) << "failed to re-register image watch: "
-                               << cpp_strerror(r) << dendl;
-        cancel_aio_requests(r);
-        cancel_async_requests(r);
+                               << cpp_strerror(m_watch_error) << dendl;
+        cancel_aio_requests(m_watch_error);
+        cancel_async_requests(m_watch_error);
         return;
       }
     }

@@ -168,6 +168,8 @@ namespace librbd {
 				  uint64_t overlap);
 
     /* object map */
+    int lock_object_map();
+    int unlock_object_map();
     bool object_may_exist(uint64_t object_no) const;
     int refresh_object_map();
     int resize_object_map(uint8_t default_object_state);
