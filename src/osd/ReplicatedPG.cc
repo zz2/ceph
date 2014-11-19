@@ -1422,12 +1422,6 @@ void ReplicatedPG::do_op(OpRequestRef& op)
     return;
   }
 
-  // degraded object?
-  if (write_ordered && is_degraded_object(head)) {
-    wait_for_degraded_object(head, op);
-    return;
-  }
-
   // missing snapdir?
   hobject_t snapdir(m->get_oid(), m->get_object_locator().key,
 		    CEPH_SNAPDIR, m->get_pg().ps(), info.pgid.pool(),
@@ -7241,10 +7235,8 @@ void ReplicatedBackend::issue_op(
     // ship resulting transaction, log entries, and pg_stats
     if (!parent->should_send_op(peer, soid)) {
       dout(10) << "issue_repop shipping empty opt to osd." << peer
-	       <<", object " << soid
-	       << " beyond MAX(last_backfill_started "
-	       << ", pinfo.last_backfill "
-	       << pinfo.last_backfill << ")" << dendl;
+	       << ", object : degraed or backfill" << soid
+	       << dendl;
       ObjectStore::Transaction t;
       ::encode(t, wr->get_data());
     } else {
@@ -8002,9 +7994,6 @@ void ReplicatedBackend::sub_op_modify(OpRequestRef op)
   // sanity checks
   assert(m->map_epoch >= get_info().history.same_interval_since);
   
-  // we better not be missing this.
-  assert(!parent->get_log().get_missing().is_missing(soid));
-
   int ackerosd = m->get_source().num();
   
   op->mark_started();
