@@ -1494,6 +1494,8 @@ OSD::OSD(CephContext *cct_, ObjectStore *store_,
   Dispatcher(cct_),
   osd_lock("OSD::osd_lock"),
   tick_timer(cct, osd_lock),
+  tick_timer_lock("OSD::tick_timer_lock"),
+  tick_timer_without_osd_lock(cct, tick_timer_lock),
   authorize_handler_cluster_registry(new AuthAuthorizeHandlerRegistry(cct,
 								      cct->_conf->auth_supported.length() ?
 								      cct->_conf->auth_supported :
@@ -1753,6 +1755,7 @@ int OSD::init()
     return 0;
 
   tick_timer.init();
+  tick_timer_without_osd_lock.init();
   service.backfill_request_timer.init();
 
   // mount.
@@ -1901,6 +1904,7 @@ int OSD::init()
 
   // tick
   tick_timer.add_event_after(cct->_conf->osd_heartbeat_interval, new C_Tick(this));
+  tick_timer_without_osd_lock.add_event_after(cct->_conf->osd_heartbeat_interval, new C_Tick_WithoutOSDLock(this));
 
   service.init();
   service.publish_map(osdmap);
@@ -2318,6 +2322,11 @@ int OSD::shutdown()
   reset_heartbeat_peers();
 
   tick_timer.shutdown();
+
+  {
+    Mutex::Locker l(tick_timer_lock);
+    tick_timer_without_osd_lock.shutdown();
+  }
 
   // note unmount epoch
   dout(10) << "noting clean unmount in epoch " << osdmap->get_epoch() << dendl;
@@ -3891,10 +3900,6 @@ void OSD::tick()
     // periodically kick recovery work queue
     recovery_tp.wake();
 
-    if (!scrub_random_backoff()) {
-      sched_scrub();
-    }
-
     check_replay_queue();
   }
 
@@ -3911,6 +3916,16 @@ void OSD::tick()
   check_ops_in_flight();
 
   tick_timer.add_event_after(1.0, new C_Tick(this));
+}
+
+void OSD::tick_without_osd_lock()
+{
+  assert(tick_timer_lock.is_locked());
+  dout(5) << "tick_without_osd_lock" << dendl;
+
+  if (!scrub_random_backoff()) {
+    sched_scrub();
+  }
 }
 
 void OSD::check_ops_in_flight()
@@ -5839,8 +5854,6 @@ bool OSD::scrub_should_schedule()
 
 void OSD::sched_scrub()
 {
-  assert(osd_lock.is_locked());
-
   bool load_is_low = scrub_should_schedule();
 
   dout(20) << "sched_scrub load_is_low=" << (int)load_is_low << dendl;
