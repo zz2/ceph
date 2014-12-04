@@ -317,6 +317,14 @@ void Elector::handle_victory(MMonElection *m)
 
   leader_acked = -1;
 
+  uint64_t required_features = mon->get_required_features();
+  if ((required_features ^ m->get_connection()->get_features()) &
+      required_features) {
+    dout(5) << " ignoring victory from mon" << from
+	    << " without required features" << dendl;
+    return;
+  }
+
   // i should have seen this election if i'm getting the victory.
   if (m->epoch != epoch + 1) { 
     dout(5) << "woah, that's a funny epoch, i must have rebooted.  bumping and re-starting!" << dendl;
