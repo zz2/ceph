@@ -3471,8 +3471,7 @@ int PG::build_scrub_map_chunk(
   hobject_t start, hobject_t end, bool deep,
   ThreadPool::TPHandle &handle)
 {
-  dout(10) << "build_scrub_map" << dendl;
-  dout(20) << "scrub_map_chunk [" << start << "," << end << ")" << dendl;
+  dout(10) << __func__ << " [" << start << "," << end << ")" << dendl;
 
   map.valid_through = info.last_update;
 
@@ -3497,7 +3496,7 @@ int PG::build_scrub_map_chunk(
 
   // pg attrs
   osd->store->collection_getattrs(coll, map.attrs);
-  dout(10) << __func__ << " done." << dendl;
+  dout(20) << __func__ << " done" << dendl;
 
   return 0;
 }
@@ -4070,13 +4069,13 @@ bool PG::scrub_gather_replica_maps()
 
 void PG::scrub_compare_maps() 
 {
-  dout(10) << "scrub_compare_maps has maps, analyzing" << dendl;
+  dout(10) << __func__ << " has maps, analyzing" << dendl;
 
   // construct authoritative scrub map for type specific scrubbing
   ScrubMap authmap(scrubber.primary_scrubmap);
 
   if (acting.size() > 1) {
-    dout(10) << "scrub  comparing replica scrub maps" << dendl;
+    dout(10) << __func__ << "  comparing replica scrub maps" << dendl;
 
     stringstream ss;
 
@@ -4084,7 +4083,7 @@ void PG::scrub_compare_maps()
     map<hobject_t, pg_shard_t> authoritative;
     map<pg_shard_t, ScrubMap *> maps;
 
-    dout(2) << "scrub   osd." << acting[0] << " has " 
+    dout(2) << __func__ << "   osd." << acting[0] << " has "
 	    << scrubber.primary_scrubmap.objects.size() << " items" << dendl;
     maps[pg_whoami] = &scrubber.primary_scrubmap;
 
@@ -4092,7 +4091,7 @@ void PG::scrub_compare_maps()
 	 i != actingbackfill.end();
 	 ++i) {
       if (*i == pg_whoami) continue;
-      dout(2) << "scrub replica " << *i << " has "
+      dout(2) << __func__ << " replica " << *i << " has "
 	      << scrubber.received_maps[*i].objects.size()
 	      << " items" << dendl;
       maps[*i] = &scrubber.received_maps[*i];
