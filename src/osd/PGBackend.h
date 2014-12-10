@@ -56,9 +56,6 @@
    public:
      /// Recovery
 
-     virtual void on_local_recover_start(
-       const hobject_t &oid,
-       ObjectStore::Transaction *t) = 0;
      /**
       * Called with the transaction recovering oid
       */
@@ -203,6 +200,9 @@
 
      virtual spg_t primary_spg_t() const = 0;
      virtual pg_shard_t primary_shard() const = 0;
+
+     virtual hobject_t get_temp_recovery_object(eversion_t version,
+						snapid_t snap) = 0;
 
      virtual void send_message_osd_cluster(
        int peer, Message *m, epoch_t from_epoch) = 0;
