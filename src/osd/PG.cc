@@ -3995,6 +3995,7 @@ void PG::scrub_compare_maps()
 
     get_pgbackend()->be_compare_scrubmaps(
       maps,
+      scrubber.seed == 0xffffffff,  // can we relate scrub digests to oi digests?
       scrubber.missing,
       scrubber.inconsistent,
       authoritative,
