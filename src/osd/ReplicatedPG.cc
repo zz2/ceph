@@ -2790,7 +2790,7 @@ ReplicatedPG::RepGather *ReplicatedPG::trim_object(const hobject_t &coid)
   return repop;
 }
 
-void ReplicatedPG::snap_trimmer()
+void ReplicatedPG::snap_trimmer(epoch_t queued)
 {
   if (g_conf->osd_snap_trim_sleep > 0) {
     utime_t t;
@@ -2801,10 +2801,11 @@ void ReplicatedPG::snap_trimmer()
   } else {
     lock();
   }
-  if (deleting) {
+  if (deleting || pg_has_reset_since(queued)) {
     unlock();
     return;
   }
+  snap_trim_queued = false;
   dout(10) << "snap_trimmer entry" << dendl;
   if (is_primary()) {
     entity_inst_t nobody;
@@ -9918,7 +9919,6 @@ void ReplicatedPG::on_shutdown()
   // remove from queues
   osd->recovery_wq.dequeue(this);
   osd->scrub_wq.dequeue(this);
-  osd->snap_trim_wq.dequeue(this);
   osd->pg_stat_queue_dequeue(this);
   osd->dequeue_pg(this, 0);
   osd->peering_wq.dequeue(this);
