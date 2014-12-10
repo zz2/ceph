@@ -302,6 +302,8 @@ OPTION(objecter_timeout, OPT_DOUBLE, 10.0)    // before we ask for a map
 OPTION(objecter_inflight_op_bytes, OPT_U64, 1024*1024*100) // max in-flight data (both directions)
 OPTION(objecter_inflight_ops, OPT_U64, 1024)               // max in-flight ios
 OPTION(objecter_completion_locks_per_session, OPT_U64, 32) // num of completion locks per each session, for serializing same object responses
+OPTION(objecter_inject_no_watch_ping, OPT_BOOL, false)   // suppress watch pings
+
 OPTION(journaler_allow_split_entries, OPT_BOOL, true)
 OPTION(journaler_write_head_interval, OPT_INT, 15)
 OPTION(journaler_prefetch_periods, OPT_INT, 10)   // * journal object size
@@ -827,7 +829,9 @@ OPTION(rbd_default_format, OPT_INT, 1)
 OPTION(rbd_default_order, OPT_INT, 22)
 OPTION(rbd_default_stripe_count, OPT_U64, 0) // changing requires stripingv2 feature
 OPTION(rbd_default_stripe_unit, OPT_U64, 0) // changing to non-object size requires stripingv2 feature
-OPTION(rbd_default_features, OPT_INT, 3) // 1 for layering, 3 for layering+stripingv2. only applies to format 2 images
+OPTION(rbd_default_features, OPT_INT, 7) // only applies to format 2 images
+					 // +1 for layering, +2 for stripingv2,
+					 // +4 for exclusive lock
 
 OPTION(nss_db_path, OPT_STR, "") // path to nss db
 
