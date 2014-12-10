@@ -365,7 +365,9 @@ void PGBackend::be_scan_list(
 }
 
 enum scrub_error_type PGBackend::be_compare_scrub_objects(
+  pg_shard_t auth_shard,
   const ScrubMap::object &auth,
+  const object_info_t& auth_oi,
   const ScrubMap::object &candidate,
   ostream &errorstream)
 {
@@ -436,7 +438,8 @@ enum scrub_error_type PGBackend::be_compare_scrub_objects(
 map<pg_shard_t, ScrubMap *>::const_iterator
   PGBackend::be_select_auth_object(
   const hobject_t &obj,
-  const map<pg_shard_t,ScrubMap*> &maps)
+  const map<pg_shard_t,ScrubMap*> &maps,
+  object_info_t *auth_oi)
 {
   map<pg_shard_t, ScrubMap *>::const_iterator auth = maps.end();
   for (map<pg_shard_t, ScrubMap *>::const_iterator j = maps.begin();
@@ -492,6 +495,7 @@ map<pg_shard_t, ScrubMap *>::const_iterator
     dout(10) << __func__ << ": selecting osd " << j->first
 	     << " for obj " << obj
 	     << dendl;
+    *auth_oi = oi;
     auth = j;
   }
   return auth;
@@ -522,8 +526,9 @@ void PGBackend::be_compare_scrubmaps(
   for (set<hobject_t>::const_iterator k = master_set.begin();
        k != master_set.end();
        ++k) {
+    object_info_t auth_oi;
     map<pg_shard_t, ScrubMap *>::const_iterator auth =
-      be_select_auth_object(*k, maps);
+      be_select_auth_object(*k, maps, &auth_oi);
     if (auth == maps.end()) {
       // Something is better than nothing
       // TODO: something is NOT better than nothing, do something like
@@ -545,9 +550,12 @@ void PGBackend::be_compare_scrubmaps(
       if (j->second->objects.count(*k)) {
 	// Compare
 	stringstream ss;
-	enum scrub_error_type error = be_compare_scrub_objects(auth->second->objects[*k],
-	    j->second->objects[*k],
-	    ss);
+	enum scrub_error_type error =
+	  be_compare_scrub_objects(auth->first,
+				   auth->second->objects[*k],
+				   auth_oi,
+				   j->second->objects[*k],
+				   ss);
         if (error != CLEAN) {
 	  cur_inconsistent.insert(j->first);
           if (error == SHALLOW_ERROR)
