@@ -314,7 +314,7 @@ PGBackend *PGBackend::build_pg_backend(
  * pg lock may or may not be held
  */
 void PGBackend::be_scan_list(
-  ScrubMap &map, const vector<hobject_t> &ls, bool deep,
+  ScrubMap &map, const vector<hobject_t> &ls, bool deep, uint32_t seed,
   ThreadPool::TPHandle &handle)
 {
   dout(10) << __func__ << " scanning " << ls.size() << " objects"
@@ -345,7 +345,7 @@ void PGBackend::be_scan_list(
 
       // calculate the CRC32 on deep scrubs
       if (deep) {
-	be_deep_scrub(*p, o, handle);
+	be_deep_scrub(*p, seed, o, handle);
       }
 
       dout(25) << __func__ << "  " << poid << dendl;

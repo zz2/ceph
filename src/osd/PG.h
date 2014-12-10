@@ -1025,7 +1025,8 @@ public:
       active_rep_scrub(0),
       must_scrub(false), must_deep_scrub(false), must_repair(false),
       state(INACTIVE),
-      deep(false)
+      deep(false),
+      seed(0)
     {
     }
 
@@ -1076,6 +1077,7 @@ public:
 
     // deep scrub
     bool deep;
+    uint32_t seed;
 
     list<Context*> callbacks;
     void add_callback(Context *context) {
@@ -1146,6 +1148,7 @@ public:
       deep_errors = 0;
       fixed = 0;
       deep = false;
+      seed = 0;
       run_callbacks();
       inconsistent.clear();
       missing.clear();
@@ -1178,10 +1181,11 @@ public:
     ThreadPool::TPHandle &handle);
   void _request_scrub_map_classic(pg_shard_t replica, eversion_t version);
   void _request_scrub_map(pg_shard_t replica, eversion_t version,
-                          hobject_t start, hobject_t end, bool deep);
+                          hobject_t start, hobject_t end, bool deep,
+			  uint32_t seed);
   int build_scrub_map_chunk(
     ScrubMap &map,
-    hobject_t start, hobject_t end, bool deep,
+    hobject_t start, hobject_t end, bool deep, uint32_t seed,
     ThreadPool::TPHandle &handle);
   void build_scrub_map(ScrubMap &map, ThreadPool::TPHandle &handle);
   void build_inc_scrub_map(

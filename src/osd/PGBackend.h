@@ -607,6 +607,7 @@
      uint64_t logical_size) { assert(0); return 0; }
    virtual void be_deep_scrub(
      const hobject_t &poid,
+     uint32_t seed,
      ScrubMap::object &o,
      ThreadPool::TPHandle &handle) { assert(0); }
 

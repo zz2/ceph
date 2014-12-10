@@ -3195,14 +3195,15 @@ void PG::_request_scrub_map_classic(pg_shard_t replica, eversion_t version)
 void PG::_request_scrub_map(
   pg_shard_t replica, eversion_t version,
   hobject_t start, hobject_t end,
-  bool deep)
+  bool deep, uint32_t seed)
 {
   assert(replica != pg_whoami);
-  dout(10) << "scrub  requesting scrubmap from osd." << replica << dendl;
+  dout(10) << "scrub  requesting scrubmap from osd." << replica
+	   << " deep " << (int)deep << " seed " << seed << dendl;
   MOSDRepScrub *repscrubop = new MOSDRepScrub(
     spg_t(info.pgid.pgid, replica.shard), version,
     get_osdmap()->get_epoch(),
-    start, end, deep);
+    start, end, deep, seed);
   osd->send_message_osd_cluster(
     replica.osd, repscrubop, get_osdmap()->get_epoch());
 }
@@ -3468,10 +3469,11 @@ void PG::_scan_snaps(ScrubMap &smap)
  */
 int PG::build_scrub_map_chunk(
   ScrubMap &map,
-  hobject_t start, hobject_t end, bool deep,
+  hobject_t start, hobject_t end, bool deep, uint32_t seed,
   ThreadPool::TPHandle &handle)
 {
-  dout(10) << __func__ << " [" << start << "," << end << ")" << dendl;
+  dout(10) << __func__ << " [" << start << "," << end << ") "
+	   << " seed " << seed << dendl;
 
   map.valid_through = info.last_update;
 
@@ -3490,7 +3492,7 @@ int PG::build_scrub_map_chunk(
   }
 
 
-  get_pgbackend()->be_scan_list(map, ls, deep, handle);
+  get_pgbackend()->be_scan_list(map, ls, deep, seed, handle);
   _scan_rollback_obs(rollback_obs, handle);
   _scan_snaps(map);
 
@@ -3522,7 +3524,7 @@ void PG::build_scrub_map(ScrubMap &map, ThreadPool::TPHandle &handle)
   vector<hobject_t> ls;
   osd->store->collection_list(coll, ls);
 
-  get_pgbackend()->be_scan_list(map, ls, false, handle);
+  get_pgbackend()->be_scan_list(map, ls, false, 0, handle);
   lock();
   _scan_snaps(map);
 
@@ -3571,7 +3573,7 @@ void PG::build_inc_scrub_map(
     }
   }
 
-  get_pgbackend()->be_scan_list(map, ls, false, handle);
+  get_pgbackend()->be_scan_list(map, ls, false, 0, handle);
   // pg attrs
   osd->store->collection_getattrs(coll, map.attrs);
 }
@@ -3638,7 +3640,7 @@ void PG::replica_scrub(
   }
 
   build_scrub_map_chunk(
-    map, msg->start, msg->end, msg->deep,
+    map, msg->start, msg->end, msg->deep, msg->seed,
     handle);
 
   vector<OSDOp> scrub(1);
@@ -3841,6 +3843,12 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
 	  oss << info.pgid.pgid << " " << mode << " starts" << std::endl;
 	  osd->clog->info(oss);
 	}
+
+	if (peer_features & CEPH_FEATURE_OSD_OBJECT_DIGEST)
+	  scrubber.seed = -1; // better, and enables oi digest checks
+	else
+	  scrubber.seed = 0;  // compat
+
         break;
 
       case PG::Scrubber::NEW_CHUNK:
@@ -3922,7 +3930,8 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
 	     ++i) {
 	  if (*i == pg_whoami) continue;
           _request_scrub_map(*i, scrubber.subset_last_update,
-                             scrubber.start, scrubber.end, scrubber.deep);
+                             scrubber.start, scrubber.end, scrubber.deep,
+			     scrubber.seed);
           scrubber.waiting_on_whom.insert(*i);
           ++scrubber.waiting_on;
         }
@@ -3956,7 +3965,7 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
         // build my own scrub map
         ret = build_scrub_map_chunk(scrubber.primary_scrubmap,
                                     scrubber.start, scrubber.end,
-                                    scrubber.deep,
+                                    scrubber.deep, scrubber.seed,
 				    handle);
         if (ret < 0) {
           dout(5) << "error building scrub map: " << ret << ", aborting" << dendl;
