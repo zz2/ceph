@@ -8,6 +8,7 @@
 
 WBThrottle::WBThrottle(CephContext *cct) :
   cur_ios(0), cur_size(0),
+  _wait(false),
   cct(cct),
   logger(NULL),
   stopping(true),
@@ -57,6 +58,7 @@ void WBThrottle::stop()
   {
     Mutex::Locker l(lock);
     stopping = true;
+    _wait = false;
     cond.Signal();
   }
 
@@ -115,6 +117,7 @@ void WBThrottle::set_from_conf()
   } else {
     assert(0 == "invalid value for fs");
   }
+  _wait = false;
   cond.Signal();
 }
 
@@ -138,14 +141,16 @@ bool WBThrottle::get_next_should_flush(
   while (!stopping &&
          cur_ios < io_limits.first &&
          pending_wbs.size() < fd_limits.first &&
-         cur_size < size_limits.first)
+         cur_size < size_limits.first) {
+         _wait = true;
          cond.Wait(lock);
+  }
   if (stopping)
     return false;
   assert(!pending_wbs.empty());
   ghobject_t obj(pop_object());
   
-  map<ghobject_t, pair<PendingWB, FDRef> >::iterator i =
+  ceph::unordered_map<ghobject_t, pair<PendingWB, FDRef> >::iterator i =
     pending_wbs.find(obj);
   *next = boost::make_tuple(obj, i->second.second, i->second.first);
   pending_wbs.erase(i);
@@ -178,7 +183,10 @@ void *WBThrottle::entry()
     cur_size -= wb.get<2>().size;
     logger->dec(l_wbthrottle_bytes_dirtied, wb.get<2>().size);
     logger->dec(l_wbthrottle_inodes_dirtied);
-    cond.Signal();
+    if(_wait) {
+      _wait = false;
+      cond.Signal();
+    }
     wb = boost::tuple<ghobject_t, FDRef, PendingWB>();
   }
   return 0;
@@ -189,7 +197,7 @@ void WBThrottle::queue_wb(
   bool nocache)
 {
   Mutex::Locker l(lock);
-  map<ghobject_t, pair<PendingWB, FDRef> >::iterator wbiter =
+  ceph::unordered_map<ghobject_t, pair<PendingWB, FDRef> >::iterator wbiter =
     pending_wbs.find(hoid);
   if (wbiter == pending_wbs.end()) {
     wbiter = pending_wbs.insert(
@@ -209,13 +217,16 @@ void WBThrottle::queue_wb(
 
   wbiter->second.first.add(nocache, len, 1);
   insert_object(hoid);
-  cond.Signal();
+  if (_wait) {
+    _wait = false;
+    cond.Signal();
+  }
 }
 
 void WBThrottle::clear()
 {
   Mutex::Locker l(lock);
-  for (map<ghobject_t, pair<PendingWB, FDRef> >::iterator i =
+  for (ceph::unordered_map<ghobject_t, pair<PendingWB, FDRef> >::iterator i =
 	 pending_wbs.begin();
        i != pending_wbs.end();
        ++i) {
@@ -228,15 +239,19 @@ void WBThrottle::clear()
   pending_wbs.clear();
   lru.clear();
   rev_lru.clear();
+
+  _wait = false;
   cond.Signal();
 }
 
 void WBThrottle::clear_object(const ghobject_t &hoid)
 {
   Mutex::Locker l(lock);
-  while (clearing == hoid)
+  while (clearing == hoid) {
+    _wait = true;
     cond.Wait(lock);
-  map<ghobject_t, pair<PendingWB, FDRef> >::iterator i =
+  }
+  ceph::unordered_map<ghobject_t, pair<PendingWB, FDRef> >::iterator i =
     pending_wbs.find(hoid);
   if (i == pending_wbs.end())
     return;
@@ -257,7 +272,8 @@ void WBThrottle::throttle()
   while (!stopping && !(
 	   cur_ios < io_limits.second &&
 	   pending_wbs.size() < fd_limits.second &&
-	   cur_size < size_limits.second)) {
+	   cur_size < size_limits.second)){
+    _wait = true;
     cond.Wait(lock);
   }
 }
