@@ -60,7 +60,6 @@ class WBThrottle : Thread, public md_config_obs_t {
 
   uint64_t cur_ios;  /// Currently unflushed IOs
   uint64_t cur_size; /// Currently unflushed bytes
-  bool _wait;
 
   /**
    * PendingWB tracks the ios pending on an object.
