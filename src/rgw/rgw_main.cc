@@ -161,6 +161,7 @@ struct RGWFCGXRequest : public RGWRequest {
   }
 
   ~RGWFCGXRequest() {
+    FCGX_Finish_r(fcgx);
     qr->enqueue(fcgx);
   }
 };
