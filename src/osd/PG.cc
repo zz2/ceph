@@ -191,8 +191,9 @@ PG::PG(OSDService *o, OSDMapRef curmap,
   coll(p), pg_log(cct),
   pgmeta_oid(p.make_pgmeta_oid()),
   missing_loc(this),
-  recovery_item(this), scrub_item(this), stat_queue_item(this),
+  recovery_item(this), stat_queue_item(this),
   snap_trim_queued(false),
+  scrub_queued(false),
   recovery_ops_active(0),
   role(0),
   state(0),
@@ -1872,6 +1873,19 @@ void PG::queue_snap_trim()
   }
 }
 
+bool PG::requeue_scrub()
+{
+  if (scrub_queued) {
+    dout(10) << __func__ << ": already queued" << dendl;
+    return false;
+  } else {
+    dout(10) << __func__ << ": queueing" << dendl;
+    scrub_queued = true;
+    osd->queue_for_scrub(this);
+    return true;
+  }
+}
+
 bool PG::queue_scrub()
 {
   assert(_lock.is_locked());
@@ -1888,7 +1902,7 @@ bool PG::queue_scrub()
     state_set(PG_STATE_REPAIR);
     scrubber.must_repair = false;
   }
-  osd->queue_for_scrub(this);
+  requeue_scrub();
   return true;
 }
 
@@ -3270,7 +3284,7 @@ void PG::sub_op_scrub_map(OpRequestRef op)
   scrubber.waiting_on_whom.erase(m->from);
 
   if (scrubber.waiting_on == 0) {
-    osd->scrub_wq.queue(this);
+    requeue_scrub();
   }
 }
 
@@ -3396,7 +3410,6 @@ void PG::schedule_backfill_full_retry()
 
 void PG::clear_scrub_reserved()
 {
-  osd->scrub_wq.dequeue(this);
   scrubber.reserved_peers.clear();
   scrubber.reserve_failed = false;
 
@@ -3676,7 +3689,7 @@ void PG::replica_scrub(
  * scrub will be chunky if all OSDs in PG support chunky scrub
  * scrub will fail if OSDs are too old.
  */
-void PG::scrub(ThreadPool::TPHandle &handle)
+void PG::scrub(epoch_t queued, ThreadPool::TPHandle &handle)
 {
   lock();
   if (g_conf->osd_scrub_sleep > 0 &&
@@ -3690,10 +3703,12 @@ void PG::scrub(ThreadPool::TPHandle &handle)
     lock();
     dout(20) << __func__ << " slept for " << t << dendl;
   }
-  if (deleting) {
+  if (deleting || pg_has_reset_since(queued)) {
     unlock();
     return;
   }
+  assert(scrub_queued);
+  scrub_queued = false;
 
   if (!is_primary() || !is_active() || !is_clean() || !is_scrubbing()) {
     dout(10) << "scrub -- not primary or active or not clean" << dendl;
@@ -4033,7 +4048,7 @@ void PG::chunky_scrub(ThreadPool::TPHandle &handle)
           scrubber.start = scrubber.end;
 
           scrubber.state = PG::Scrubber::NEW_CHUNK;
-          osd->scrub_wq.queue(this);
+	  requeue_scrub();
           done = true;
         } else {
           scrubber.state = PG::Scrubber::FINISH;
@@ -4704,6 +4719,7 @@ void PG::start_peering_interval(
   peer_purged.clear();
   actingbackfill.clear();
   snap_trim_queued = false;
+  scrub_queued = false;
 
   // reset primary state?
   if (was_old_primary || is_primary()) {
