@@ -29,6 +29,13 @@ namespace ceph {
   class Formatter;
 }
 
+#ifndef UINT64_MAX
+#define UINT64_MAX (18446744073709551615ULL)
+#endif
+#ifndef INT64_MIN
+#define INT64_MIN 0x8000000000000000ll
+#endif
+
 struct hobject_t {
   object_t oid;
   snapid_t snap;
@@ -75,7 +82,7 @@ public:
     return pool == POOL_META;
   }
 
-  hobject_t() : snap(0), hash(0), max(false), pool(-1) {
+  hobject_t() : snap(0), hash(0), max(false), pool(INT64_MIN) {
     build_filestore_key_cache();
   }
 
@@ -247,10 +254,6 @@ WRITE_CMP_OPERATORS_7(hobject_t,
 		      snap)
 
 typedef version_t gen_t;
-
-#ifndef UINT64_MAX
-#define UINT64_MAX (18446744073709551615ULL)
-#endif
 
 struct ghobject_t {
   hobject_t hobj;
