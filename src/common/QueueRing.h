@@ -2,6 +2,7 @@
 #define QUEUE_RING_H
 
 #include <list>
+#include <vector>
 #include "common/Mutex.h"
 #include "common/Cond.h"
 
@@ -15,16 +16,16 @@ class QueueRing {
     typename std::list<T> entries;
 
     QueueBucket() : lock("QueueRing::QueueBucket::lock") {}
+    QueueBucket(const QueueBucket& rhs) : lock("QueueRing::QueueBucket::lock") {
+      entries = rhs.entries;
+    }
 
     void enqueue(const T& entry) {
       lock.Lock();
-      bool need_signal = entries.empty();
-      entries.push_back(entry);
-
-      if (need_signal) {
+      if (entries.empty()) {
         cond.Signal();
       }
-
+      entries.push_back(entry);
       lock.Unlock();
     }
 
@@ -40,13 +41,12 @@ class QueueRing {
     };
   };
 
-  QueueBucket *buckets;
+  std::vector<QueueBucket> buckets;
   int num_buckets;
   atomic_t cur_read_bucket;
   atomic_t cur_write_bucket;
 public:
-  QueueRing(int n) : num_buckets(n) {
-    buckets = new QueueBucket[n];
+  QueueRing(int n) : buckets(n), num_buckets(n) {
   }
 
   void enqueue(const T& entry) {
