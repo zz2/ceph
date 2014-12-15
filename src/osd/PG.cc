@@ -2763,6 +2763,7 @@ void PG::append_log(
 	t.remove(coll, p->soid);
 
       assert(
+	p->soid > info.last_backfill ||
 	pg_log.get_missing().is_missing(p->soid) ||
 	(p->is_clone() || p->is_promote() ||
 	 (p->is_modify() && (p->prior_version == eversion_t())))
