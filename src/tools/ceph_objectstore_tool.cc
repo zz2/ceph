@@ -1749,7 +1749,8 @@ int do_import(ObjectStore *store, OSDSuperblock& sb)
   }
   if (!curmap.have_pg_pool(pgid.pgid.m_pool)) {
     cerr << "Pool " << pgid.pgid.m_pool << " no longer exists" << std::endl;
-    return 1;
+    // Special exit code for this error, used by test code
+    return 10;
   }
 
   ghobject_t pgmeta_oid = pgid.make_pgmeta_oid();
@@ -3091,5 +3092,5 @@ out:
     return 1;
   }
 
-  return (ret != 0);
+  return ret;
 }
