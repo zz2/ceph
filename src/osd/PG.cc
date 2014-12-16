@@ -185,7 +185,7 @@ PG::PG(OSDService *o, OSDMapRef curmap,
   #ifdef PG_DEBUG_REFS
   _ref_id_lock("PG::_ref_id_lock"), _ref_id(0),
   #endif
-  deleting(false), dirty_info(false), dirty_big_info(false),
+  dirty_info(false), dirty_big_info(false),
   info(p),
   info_struct_v(0),
   coll(p), pg_log(cct),
@@ -201,7 +201,6 @@ PG::PG(OSDService *o, OSDMapRef curmap,
   send_notify(false),
   pg_whoami(osd->whoami, p.shard),
   need_up_thru(false),
-  last_peering_reset(0),
   heartbeat_peer_lock("PG::heartbeat_peer_lock"),
   backfill_reserved(0),
   backfill_reserving(0),
@@ -214,7 +213,10 @@ PG::PG(OSDService *o, OSDMapRef curmap,
   active_pushes(0),
   recovery_state(this),
   pg_id(p),
-  peer_features((uint64_t)-1)
+  peer_features((uint64_t)-1),
+  last_peering_reset_lock("PG::last_peering_reset_lock"),
+  last_peering_reset(0),
+  _deleting(false)
 {
 #ifdef PG_DEBUG_REFS
   osd->add_pgid(p, this);
@@ -1986,7 +1988,7 @@ void PG::finish_recovery(list<Context*>& tfin)
 void PG::_finish_recovery(Context *c)
 {
   lock();
-  if (deleting) {
+  if (is_deleting()) {
     unlock();
     return;
   }
@@ -3716,7 +3718,7 @@ void PG::scrub(epoch_t queued, ThreadPool::TPHandle &handle)
     lock();
     dout(20) << __func__ << " slept for " << t << dendl;
   }
-  if (deleting || pg_has_reset_since(queued)) {
+  if (pg_has_reset_since(queued)) {
     unlock();
     return;
   }
@@ -4567,6 +4569,7 @@ bool PG::old_peering_msg(epoch_t reply_epoch, epoch_t query_epoch)
 
 void PG::set_last_peering_reset()
 {
+  Mutex::Locker l(last_peering_reset_lock);
   dout(20) << "set_last_peering_reset " << get_osdmap()->get_epoch() << dendl;
   if (last_peering_reset != get_osdmap()->get_epoch()) {
     last_peering_reset = get_osdmap()->get_epoch();
@@ -4744,7 +4747,7 @@ void PG::start_peering_interval(
   // pg->on_*
   on_change(t);
 
-  assert(!deleting);
+  assert(!is_deleting());
 
   // should we tell the primary we are here?
   send_notify = !is_primary();
