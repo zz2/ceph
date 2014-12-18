@@ -123,10 +123,24 @@ public:
     bool mirror_snapset;
     map<string, bufferlist> attrs; ///< src user attrs
     bool has_omap;
-    CopyResults() : object_size(0), started_temp_obj(false),
-		    final_tx(NULL), user_version(0), 
-		    should_requeue(false), mirror_snapset(false),
-		    has_omap(false) {}
+    uint32_t flags;    // object_copy_data_t::FLAG_*
+    uint32_t source_data_digest, source_omap_digest;
+    uint32_t data_digest, omap_digest;
+    bool is_data_digest() {
+      return flags & object_copy_data_t::FLAG_DATA_DIGEST;
+    }
+    bool is_omap_digest() {
+      return flags & object_copy_data_t::FLAG_OMAP_DIGEST;
+    }
+    CopyResults()
+      : object_size(0), started_temp_obj(false),
+	final_tx(NULL), user_version(0),
+	should_requeue(false), mirror_snapset(false),
+	has_omap(false),
+	flags(0),
+	source_data_digest(-1), source_omap_digest(-1),
+	data_digest(-1), omap_digest(-1)
+    {}
   };
 
   struct CopyOp {
@@ -146,7 +160,7 @@ public:
     map<string,bufferlist> attrs;
     bufferlist data;
     bufferlist omap_header;
-    map<string,bufferlist> omap;
+    bufferlist omap_data;
     int rval;
 
     object_copy_cursor_t temp_cursor;
@@ -195,6 +209,23 @@ public:
 
   friend class CopyFromCallback;
   friend class PromoteCallback;
+
+  struct ProxyReadOp {
+    OpRequestRef op;
+    hobject_t soid;
+    ceph_tid_t objecter_tid;
+    vector<OSDOp> &ops;
+    version_t user_version;
+    int data_offset;
+    bool canceled;              ///< true if canceled
+
+    ProxyReadOp(OpRequestRef _op, hobject_t oid, vector<OSDOp>& _ops)
+      : op(_op), soid(oid),
+        objecter_tid(0), ops(_ops),
+	user_version(0), data_offset(0),
+	canceled(false) { }
+  };
+  typedef boost::shared_ptr<ProxyReadOp> ProxyReadOpRef;
 
   struct FlushOp {
     ObjectContextRef obc;       ///< obc we are flushing
@@ -572,6 +603,22 @@ public:
 	snapset = &obc->ssc->snapset;
       }
     }
+    OpContext(OpRequestRef _op, osd_reqid_t _reqid,
+              vector<OSDOp>& _ops, ReplicatedPG *_pg) :
+      op(_op), reqid(_reqid), ops(_ops), obs(NULL), snapset(0),
+      modify(false), user_modify(false), undirty(false), cache_evict(false),
+      bytes_written(0), bytes_read(0), user_at_version(0),
+      current_osd_subop_num(0),
+      op_t(NULL),
+      data_off(0), reply(NULL), pg(_pg),
+      num_read(0),
+      num_write(0),
+      copy_cb(NULL),
+      async_read_result(0),
+      inflightreads(0),
+      lock_to_release(NONE),
+      on_finish(NULL),
+      release_snapset_obc(false) { }
     void reset_obs(ObjectContextRef obc) {
       new_obs = ObjectState(obc->obs.oi, obc->obs.exists);
       if (obc->ssc) {
@@ -1052,7 +1099,8 @@ protected:
     const hobject_t& head, const hobject_t& coid,
     object_info_t *poi);
   void execute_ctx(OpContext *ctx);
-  void finish_ctx(OpContext *ctx, int log_op_type, bool maintain_ssc=true);
+  void finish_ctx(OpContext *ctx, int log_op_type, bool maintain_ssc=true,
+		  bool scrub_ok=false);
   void reply_ctx(OpContext *ctx, int err);
   void reply_ctx(OpContext *ctx, int err, eversion_t v, version_t uv);
   void make_writeable(OpContext *ctx);
@@ -1080,8 +1128,10 @@ protected:
   /**
    * This function starts up a copy from
    */
-  void promote_object(OpRequestRef op, ObjectContextRef obc,
-		      const hobject_t& missing_object);
+  void promote_object(ObjectContextRef obc,            ///< [optional] obc
+		      const hobject_t& missing_object, ///< oid (if !obc)
+		      const object_locator_t& oloc,    ///< locator for obc|oid
+		      OpRequestRef op);                ///< [optional] client op
 
   /**
    * Check if the op is such that we can skip promote (e.g., DELETE)
@@ -1237,8 +1287,7 @@ protected:
   void _build_finish_copy_transaction(CopyOpRef cop,
                                       PGBackend::PGTransaction *t);
   void finish_copyfrom(OpContext *ctx);
-  void finish_promote(int r, OpRequestRef op,
-		      CopyResults *results, ObjectContextRef obc);
+  void finish_promote(int r, CopyResults *results, ObjectContextRef obc);
   void cancel_copy(CopyOpRef cop, bool requeue);
   void cancel_copy_ops(bool requeue);
 
@@ -1266,9 +1315,11 @@ protected:
   virtual bool _range_available_for_scrub(
     const hobject_t &begin, const hobject_t &end);
   virtual void _scrub(ScrubMap& map);
+  void _scrub_digest_updated();
   virtual void _scrub_clear_state();
   virtual void _scrub_finish();
   object_stat_collection_t scrub_cstat;
+  friend class C_ScrubDigestUpdated;
 
   virtual void _split_into(pg_t child_pgid, PG *child, unsigned split_bits);
   void apply_and_flush_repops(bool requeue);
@@ -1279,6 +1330,18 @@ protected:
 
   bool pgls_filter(PGLSFilter *filter, hobject_t& sobj, bufferlist& outdata);
   int get_pgls_filter(bufferlist::iterator& iter, PGLSFilter **pfilter);
+
+  // -- proxyread --
+  map<ceph_tid_t, ProxyReadOpRef> proxyread_ops;
+  map<hobject_t, list<OpRequestRef> > in_progress_proxy_reads;
+
+  void do_proxy_read(OpRequestRef op, const hobject_t& missing_oid);
+  void finish_proxy_read(hobject_t oid, ceph_tid_t tid, int r);
+  void kick_proxy_read_blocked(hobject_t& soid);
+  void cancel_proxy_read(ProxyReadOpRef prdop);
+  void cancel_proxy_read_ops(bool requeue);
+
+  friend struct C_ProxyRead;
 
 public:
   ReplicatedPG(OSDService *o, OSDMapRef curmap,
