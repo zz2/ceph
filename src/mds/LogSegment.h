@@ -94,6 +94,8 @@ class LogSegment {
     slave_updates(0), // passed to begin() manually
     inotablev(0), sessionmapv(0)
   { }
+
+  void teardown(MDS *mds);
 };
 
 #endif

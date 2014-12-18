@@ -703,6 +703,7 @@ void MDLog::_trim_expired_segments()
     logger->inc(l_mdl_evtrm, ls->num_events);
     
     segments.erase(ls->seq);
+    ls->teardown(mds);
     delete ls;
     trimmed = true;
   }

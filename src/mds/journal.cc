@@ -283,6 +283,18 @@ void LogSegment::try_to_expire(MDS *mds, MDSGatherBuilder &gather_bld, int op_pr
   }
 }
 
+void LogSegment::teardown(MDS *mds)
+{
+  if (!dirty_dentries.empty()) {
+    derr << __func__ << ": dirty_dentries is not empty:" << dendl;
+    for (elist<CDentry*>::iterator i = dirty_dentries.begin();
+        !i.end(); ++i)
+    {
+      derr << __func__ << "  " << *(*i) << dendl;
+    }
+  }
+}
+
 #undef DOUT_COND
 #define DOUT_COND(cct, l) (l<=cct->_conf->debug_mds || l <= cct->_conf->debug_mds_log)
 
