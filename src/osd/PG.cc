@@ -2768,10 +2768,17 @@ void PG::append_log(
 	(p->is_clone() || p->is_promote() ||
 	 (p->is_modify() && (p->prior_version == eversion_t())))
 	);
-      dout(10) << __func__ << ": transaction empty, adding event "
-	       << *p << " to missing"
-	       << dendl;
-      pg_log.missing_add_event(*p);
+
+      if (p->soid > info.last_backfill) {
+	dout(10) << __func__ << ": transaction empty, adding event "
+		 << *p << " to missing"
+		 << dendl;
+	pg_log.missing_add_event(*p);
+      } else {
+	dout(10) << __func__ << ": transaction empty, backfill, "
+		 << "not adding event " << *p << " to missing"
+		 << dendl;
+      }
     }
     add_log_entry(*p, keys[p->get_key_name()]);
   }
