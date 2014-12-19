@@ -2769,7 +2769,7 @@ void PG::append_log(
 	 (p->is_modify() && (p->prior_version == eversion_t())))
 	);
 
-      if (p->soid > info.last_backfill) {
+      if (p->soid <= info.last_backfill) {
 	dout(10) << __func__ << ": transaction empty, adding event "
 		 << *p << " to missing"
 		 << dendl;
