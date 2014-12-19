@@ -75,7 +75,6 @@ int CephxSessionHandler::check_message_signature(Message *m)
     return 0;
   }
 
-  bufferlist bl_plaintext, bl_ciphertext;
   std::string sig_error;
   ceph_msg_header& header = m->get_header();
   ceph_msg_footer& footer = m->get_footer();
@@ -89,16 +88,20 @@ int CephxSessionHandler::check_message_signature(Message *m)
 
   ldout(cct, 10) << "check_message_signature: seq # = " << m->get_seq() << " front_crc_ = " << footer.front_crc
 		 << " middle_crc = " << footer.middle_crc << " data_crc = " << footer.data_crc << dendl;
-  ::encode(header.crc, bl_plaintext);
-  ::encode(footer.front_crc, bl_plaintext);
-  ::encode(footer.middle_crc, bl_plaintext);
-  ::encode(footer.data_crc, bl_plaintext);
-
-  // Encrypt the buffer containing the checksums to calculate the signature. PLR
-  if (encode_encrypt(cct, bl_plaintext, key, bl_ciphertext, sig_error)) {
-    ldout(cct, 0) << "error in encryption for checking message signature: " << sig_error << dendl;
-    return (SESSION_SIGNATURE_FAILURE);
-  } 
+  struct {
+    __u8 v;
+    __le64 magic;
+    __le32 header_crc;
+    __le32 front_crc;
+    __le32 middle_crc;
+    __le32 data_crc;
+  } __attribute__ ((packed)) sigblock = {
+    1, AUTH_ENC_MAGIC,
+    header.crc, footer.front_crc, footer.middle_crc, footer.data_crc
+  };
+  bufferlist bl_plaintext, bl_ciphertext;
+  bl_plaintext.append(buffer::create_static(sizeof(sigblock), (char*)&sigblock));
+  key.encrypt(cct, bl_plaintext, bl_ciphertext, sig_error);
 
   bufferlist::iterator ci = bl_ciphertext.begin();
   // Skip the magic number at the front. PLR
