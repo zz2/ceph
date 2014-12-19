@@ -210,7 +210,7 @@ void WBThrottle::queue_wb(
 
   wbiter->second.first.add(nocache, len, 1);
   insert_object(hoid);
-  cond.Signal(); 
+  cond.Signal();
 }
 
 void WBThrottle::clear()
@@ -229,16 +229,14 @@ void WBThrottle::clear()
   pending_wbs.clear();
   lru.clear();
   rev_lru.clear();
-
   cond.Signal();
 }
 
 void WBThrottle::clear_object(const ghobject_t &hoid)
 {
   Mutex::Locker l(lock);
-  while (clearing == hoid) {
+  while (clearing == hoid)
     cond.Wait(lock);
-  }
   ceph::unordered_map<ghobject_t, pair<PendingWB, FDRef> >::iterator i =
     pending_wbs.find(hoid);
   if (i == pending_wbs.end())
