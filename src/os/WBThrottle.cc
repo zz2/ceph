@@ -140,7 +140,6 @@ bool WBThrottle::get_next_should_flush(
          pending_wbs.size() < fd_limits.first &&
          cur_size < size_limits.first)
          cond.Wait(lock);
-
   if (stopping)
     return false;
   assert(!pending_wbs.empty());
