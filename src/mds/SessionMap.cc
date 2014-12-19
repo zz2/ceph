@@ -25,7 +25,7 @@
 
 #define dout_subsys ceph_subsys_mds
 #undef dout_prefix
-#define dout_prefix *_dout << "mds." << mds->get_nodeid() << ".sessionmap "
+#define dout_prefix *_dout << "sessionmap "
 
 
 class SessionMapIOContext : public MDSIOContextBase
@@ -350,6 +350,7 @@ void SessionMap::touch_session(Session *session)
  */
 void Session::notify_cap_release(size_t n_caps)
 {
+  dout(10) << __func__ << " session " << info.inst << " n_caps=" << n_caps << dendl;
   if (!recalled_at.is_zero()) {
     recall_release_count += n_caps;
     if (recall_release_count >= recall_count) {
@@ -368,6 +369,7 @@ void Session::notify_cap_release(size_t n_caps)
  */
 void Session::notify_recall_sent(int const new_limit)
 {
+  dout(10) << __func__ << " session " << info.inst << " new_limit=" << new_limit << dendl;
   if (recalled_at.is_zero()) {
     // Entering recall phase, set up counters so we can later
     // judge whether the client has respected the recall request

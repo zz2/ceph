@@ -325,6 +325,20 @@ void Beacon::notify_health(MDS const *mds)
         dout(20) << "Session servicing RECALL " << session->info.inst
           << ": " << session->recalled_at << " " << session->recall_release_count
           << "/" << session->recall_count << dendl;
+
+        if (session->caps.size() <= 100) {
+          // Sanity: if client has fewer than the minimum cap limit, then it can't
+          // possibly be expected to release more, and something has gone wrong
+          // with the cap release accounting on our end.
+          dout(1) << __func__ << ": session " << session->info.inst
+            << " is waiting for recall but has fewer than minimum "
+            << "allowance of capabilities (" << session->caps.size()
+            << "vs recalled_at=" << session->recalled_at << " recall_count="
+            << session->recall_count << " recall_release_count="
+            << session->recall_release_count << dendl;
+          session->notify_cap_release(session->recall_count);
+        }
+
         if (session->recalled_at < cutoff) {
           dout(20) << "  exceeded timeout " << session->recalled_at << " vs. " << cutoff << dendl;
           std::ostringstream oss;
