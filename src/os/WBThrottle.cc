@@ -257,6 +257,7 @@ void WBThrottle::throttle()
   while (!stopping && !(
 	   cur_ios < io_limits.second &&
 	   pending_wbs.size() < fd_limits.second &&
-	   cur_size < size_limits.second))
+	   cur_size < size_limits.second)) {
     cond.Wait(lock);
+  }
 }
