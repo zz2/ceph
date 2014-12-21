@@ -153,11 +153,12 @@ public:
     const hobject_t &hoid,
     uint64_t off,
     uint64_t len,
+    uint32_t op_flags,
     bufferlist *bl);
 
   void objects_read_async(
     const hobject_t &hoid,
-    const list<pair<pair<uint64_t, uint64_t>,
+    const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 	       pair<bufferlist*, Context*> > > &to_read,
     Context *on_complete);
 
@@ -412,6 +413,7 @@ private:
 
   void be_deep_scrub(
     const hobject_t &obj,
+    uint32_t seed,
     ScrubMap::object &o,
     ThreadPool::TPHandle &handle);
   uint64_t be_get_ondisk_size(uint64_t logical_size) { return logical_size; }

@@ -225,9 +225,10 @@ int ReplicatedBackend::objects_read_sync(
   const hobject_t &hoid,
   uint64_t off,
   uint64_t len,
+  uint32_t op_flags,
   bufferlist *bl)
 {
-  return store->read(coll, hoid, off, len, *bl);
+  return store->read(coll, hoid, off, len, *bl, op_flags);
 }
 
 struct AsyncReadCallback : public GenContext<ThreadPool::TPHandle&> {
@@ -244,18 +245,19 @@ struct AsyncReadCallback : public GenContext<ThreadPool::TPHandle&> {
 };
 void ReplicatedBackend::objects_read_async(
   const hobject_t &hoid,
-  const list<pair<pair<uint64_t, uint64_t>,
+  const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		  pair<bufferlist*, Context*> > > &to_read,
   Context *on_complete)
 {
   int r = 0;
-  for (list<pair<pair<uint64_t, uint64_t>,
+  for (list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		 pair<bufferlist*, Context*> > >::const_iterator i =
 	   to_read.begin();
        i != to_read.end() && r >= 0;
        ++i) {
-    int _r = store->read(coll, hoid, i->first.first,
-			 i->first.second, *(i->second.first));
+    int _r = store->read(coll, hoid, i->first.get<0>(),
+			 i->first.get<1>(), *(i->second.first),
+			 i->first.get<2>());
     if (i->second.second) {
       get_parent()->schedule_recovery_work(
 	get_parent()->bless_gencontext(
@@ -319,10 +321,11 @@ public:
     const hobject_t &hoid,
     uint64_t off,
     uint64_t len,
-    bufferlist &bl
+    bufferlist &bl,
+    uint32_t fadvise_flags
     ) {
     written += len;
-    t->write(get_coll_ct(hoid), hoid, off, len, bl);
+    t->write(get_coll_ct(hoid), hoid, off, len, bl, fadvise_flags);
   }
   void remove(
     const hobject_t &hoid
@@ -626,7 +629,7 @@ void ReplicatedBackend::op_commit(
 void ReplicatedBackend::sub_op_modify_reply(OpRequestRef op)
 {
   MOSDSubOpReply *r = static_cast<MOSDSubOpReply*>(op->get_req());
-  assert(r->get_header().type == MSG_OSD_SUBOPREPLY);
+  assert(r->get_type() == MSG_OSD_SUBOPREPLY);
 
   op->mark_started();
 
@@ -690,9 +693,12 @@ void ReplicatedBackend::sub_op_modify_reply(OpRequestRef op)
 
 void ReplicatedBackend::be_deep_scrub(
   const hobject_t &poid,
+  uint32_t seed,
   ScrubMap::object &o,
-  ThreadPool::TPHandle &handle) {
-  bufferhash h, oh;
+  ThreadPool::TPHandle &handle)
+{
+  dout(10) << __func__ << " " << poid << " seed " << seed << dendl;
+  bufferhash h(seed), oh(seed);
   bufferlist bl, hdrbl;
   int r;
   __u64 pos = 0;
@@ -709,7 +715,7 @@ void ReplicatedBackend::be_deep_scrub(
     bl.clear();
   }
   if (r == -EIO) {
-    dout(25) << "_scan_list  " << poid << " got "
+    dout(25) << __func__ << "  " << poid << " got "
 	     << r << " on read, read_error" << dendl;
     o.read_error = true;
   }
@@ -722,14 +728,21 @@ void ReplicatedBackend::be_deep_scrub(
     ghobject_t(
       poid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
     &hdrbl, true);
-  if (r == 0) {
+  // NOTE: bobtail to giant, we would crc the head as (len, head).
+  // that changes at the same time we start using a non-zero seed.
+  if (r == 0 && hdrbl.length()) {
     dout(25) << "CRC header " << string(hdrbl.c_str(), hdrbl.length())
              << dendl;
-    ::encode(hdrbl, bl);
-    oh << bl;
-    bl.clear();
+    if (seed == 0) {
+      // legacy
+      bufferlist bl;
+      ::encode(hdrbl, bl);
+      oh << bl;
+    } else {
+      oh << hdrbl;
+    }
   } else if (r == -EIO) {
-    dout(25) << "_scan_list  " << poid << " got "
+    dout(25) << __func__ << "  " << poid << " got "
 	     << r << " on omap header read, read_error" << dendl;
     o.read_error = true;
   }
@@ -756,7 +769,7 @@ void ReplicatedBackend::be_deep_scrub(
     bl.clear();
   }
   if (iter->status() == -EIO) {
-    dout(25) << "_scan_list  " << poid << " got "
+    dout(25) << __func__ << "  " << poid << " got "
 	     << r << " on omap scan, read_error" << dendl;
     o.read_error = true;
   }
