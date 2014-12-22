@@ -220,11 +220,13 @@ protected:
     return osdmap_ref;
   }
 
+public:
   OSDMapRef get_osdmap() const {
     assert(is_locked());
     assert(osdmap_ref);
     return osdmap_ref;
   }
+protected:
 
   /** locking and reference counting.
    * I destroy myself when the reference count hits zero.
@@ -244,8 +246,6 @@ protected:
 #endif
 
 public:
-  bool deleting;  // true while in removing or OSD is shutting down
-
 
   void lock_suspend_timeout(ThreadPool::TPHandle &handle);
   void lock(bool no_lockdep = false);
@@ -431,7 +431,11 @@ public:
 
   /* You should not use these items without taking their respective queue locks
    * (if they have one) */
-  xlist<PG*>::item recovery_item, scrub_item, snap_trim_item, stat_queue_item;
+  xlist<PG*>::item stat_queue_item;
+  bool snap_trim_queued;
+  bool scrub_queued;
+  bool recovery_queued;
+
   int recovery_ops_active;
   set<pg_shard_t> waiting_on_backfill;
 #ifdef DEBUG_RECOVERY_OIDS
@@ -621,8 +625,6 @@ protected:
   // primary-only, recovery-only state
   set<pg_shard_t> might_have_unfound;  // These osds might have objects on them
                                        // which are unfound on the primary
-  epoch_t last_peering_reset;
-
 
   /* heartbeat peers */
   void set_probe_targets(const set<pg_shard_t> &probe_set);
@@ -1027,7 +1029,6 @@ public:
       epoch_start(0),
       block_writes(false), active(false), queue_snap_trim(false),
       waiting_on(0), shallow_errors(0), deep_errors(0), fixed(0),
-      active_rep_scrub(0),
       must_scrub(false), must_deep_scrub(false), must_repair(false),
       num_digest_updates_pending(0),
       state(INACTIVE),
@@ -1052,7 +1053,7 @@ public:
     int fixed;
     ScrubMap primary_scrubmap;
     map<pg_shard_t, ScrubMap> received_maps;
-    MOSDRepScrub *active_rep_scrub;
+    OpRequestRef active_rep_scrub;
     utime_t scrub_reg_stamp;  // stamp we registered for
 
     // flags to indicate explicitly requested scrubs (by admin)
@@ -1143,8 +1144,7 @@ public:
       waiting_on = 0;
       waiting_on_whom.clear();
       if (active_rep_scrub) {
-        active_rep_scrub->put();
-        active_rep_scrub = NULL;
+        active_rep_scrub = OpRequestRef();
       }
       received_maps.clear();
 
@@ -1180,7 +1180,7 @@ public:
     pg_shard_t bad_peer,
     pg_shard_t ok_peer);
 
-  void scrub(ThreadPool::TPHandle &handle);
+  void scrub(epoch_t queued, ThreadPool::TPHandle &handle);
   void chunky_scrub(ThreadPool::TPHandle &handle);
   void scrub_compare_maps();
   void scrub_process_inconsistent();
@@ -1228,7 +1228,7 @@ public:
   void unreg_next_scrub();
 
   void replica_scrub(
-    struct MOSDRepScrub *op,
+    OpRequestRef op,
     ThreadPool::TPHandle &handle);
   void sub_op_scrub_map(OpRequestRef op);
   void sub_op_scrub_reserve(OpRequestRef op);
@@ -2008,7 +2008,33 @@ public:
   const spg_t pg_id;
   uint64_t peer_features;
 
+  mutable Mutex last_peering_reset_lock; // protects last_peering_rest and deleting
+  epoch_t last_peering_reset;
+  bool _deleting;  // true while in removing or OSD is shutting down
  public:
+  void set_last_peering_reset();
+  bool pg_has_reset_since(epoch_t e) {
+    Mutex::Locker l(last_peering_reset_lock);
+    assert(is_locked());
+    return _deleting || e < get_last_peering_reset();
+  }
+  epoch_t get_last_peering_reset() const {
+    Mutex::Locker l(last_peering_reset_lock);
+    return last_peering_reset;
+  }
+  void set_deleting() {
+    Mutex::Locker l(last_peering_reset_lock);
+    _deleting = true;
+  }
+  void unset_deleting() {
+    Mutex::Locker l(last_peering_reset_lock);
+    _deleting = false;
+  }
+  bool is_deleting() {
+    Mutex::Locker l(last_peering_reset_lock);
+    return _deleting;
+  }
+
   const spg_t&      get_pgid() const { return pg_id; }
   int        get_nrep() const { return acting.size(); }
 
@@ -2061,8 +2087,6 @@ public:
   bool       is_primary() const { return pg_whoami == primary; }
   bool       is_replica() const { return role > 0; }
 
-  epoch_t get_last_peering_reset() const { return last_peering_reset; }
-  
   //int  get_state() const { return state; }
   bool state_test(int m) const { return (state & m) != 0; }
   void state_set(int m) { state |= m; }
@@ -2148,6 +2172,8 @@ public:
   void log_weirdness();
 
   void queue_snap_trim();
+  bool requeue_scrub();
+  void queue_recovery(bool front = false);
   bool queue_scrub();
 
   /// share pg info after a pg is active
@@ -2164,11 +2190,6 @@ public:
   void start_flush(ObjectStore::Transaction *t,
 		   list<Context *> *on_applied,
 		   list<Context *> *on_safe);
-  void set_last_peering_reset();
-  bool pg_has_reset_since(epoch_t e) {
-    assert(is_locked());
-    return deleting || e < get_last_peering_reset();
-  }
 
   void update_history_from_master(pg_history_t new_history);
   void fulfill_info(pg_shard_t from, const pg_query_t &query,
@@ -2243,7 +2264,7 @@ public:
     ThreadPool::TPHandle &handle
   ) = 0;
   virtual void do_backfill(OpRequestRef op) = 0;
-  virtual void snap_trimmer() = 0;
+  virtual void snap_trimmer(epoch_t epoch_queued) = 0;
 
   virtual int do_command(cmdmap_t cmdmap, ostream& ss,
 			 bufferlist& idata, bufferlist& odata) = 0;

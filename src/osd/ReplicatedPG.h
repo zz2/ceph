@@ -793,7 +793,7 @@ protected:
     assert(ctx->release_snapset_obc == false);
     ctx->lock_to_release = OpContext::NONE;
     if (requeue_recovery || requeue_recovery_clone || requeue_recovery_snapset)
-      osd->recovery_wq.queue(this);
+      queue_recovery();
     if (requeue_snaptrimmer ||
 	requeue_snaptrimmer_clone ||
 	requeue_snaptrimmer_snapset)
@@ -1319,7 +1319,7 @@ public:
   void do_backfill(OpRequestRef op);
 
   RepGather *trim_object(const hobject_t &coid);
-  void snap_trimmer();
+  void snap_trimmer(epoch_t e);
   int do_osd_ops(OpContext *ctx, vector<OSDOp>& ops);
 
   int _get_tmap(OpContext *ctx, bufferlist *header, bufferlist *vals);
