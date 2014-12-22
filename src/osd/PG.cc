@@ -4567,8 +4567,8 @@ bool PG::old_peering_msg(epoch_t reply_epoch, epoch_t query_epoch)
 
 void PG::set_last_peering_reset()
 {
-  Mutex::Locker l(last_peering_reset_lock);
   dout(20) << "set_last_peering_reset " << get_osdmap()->get_epoch() << dendl;
+  Mutex::Locker l(last_peering_reset_lock);
   if (last_peering_reset != get_osdmap()->get_epoch()) {
     last_peering_reset = get_osdmap()->get_epoch();
     reset_interval_flush();
