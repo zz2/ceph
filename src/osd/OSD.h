@@ -1723,7 +1723,7 @@ protected:
     PG::CephPeeringEvtRef evt);
   
   void load_pgs();
-  void build_past_intervals_parallel();
+  void build_past_intervals_parallel(epoch_t oldest_map);
 
   void calc_priors_during(
     spg_t pgid, epoch_t start, epoch_t end, set<pg_shard_t>& pset);

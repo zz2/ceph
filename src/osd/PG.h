@@ -794,8 +794,8 @@ public:
 
   void mark_clean();  ///< mark an active pg clean
 
-  bool _calc_past_interval_range(epoch_t *start, epoch_t *end);
-  void generate_past_intervals();
+  bool _calc_past_interval_range(epoch_t *start, epoch_t *end, epoch_t oldest_map);
+  void generate_past_intervals(epoch_t oldest_map);
   void trim_past_intervals();
   void build_prior(std::auto_ptr<PriorSet> &prior_set);
 

@@ -623,7 +623,7 @@ bool PG::needs_backfill() const
   return ret;
 }
 
-bool PG::_calc_past_interval_range(epoch_t *start, epoch_t *end)
+bool PG::_calc_past_interval_range(epoch_t *start, epoch_t *end, epoch_t oldest_map)
 {
   *end = info.history.same_interval_since;
 
@@ -640,7 +640,7 @@ bool PG::_calc_past_interval_range(epoch_t *start, epoch_t *end)
 
   *start = MAX(MAX(info.history.epoch_created,
 		   info.history.last_epoch_clean),
-	       osd->get_superblock().oldest_map);
+	       oldest_map);
   if (*start >= *end) {
     dout(10) << __func__ << " start epoch " << *start << " >= end epoch " << *end
 	     << ", nothing to do" << dendl;
@@ -651,10 +651,10 @@ bool PG::_calc_past_interval_range(epoch_t *start, epoch_t *end)
 }
 
 
-void PG::generate_past_intervals()
+void PG::generate_past_intervals(epoch_t oldest_map)
 {
   epoch_t cur_epoch, end_epoch;
-  if (!_calc_past_interval_range(&cur_epoch, &end_epoch)) {
+  if (!_calc_past_interval_range(&cur_epoch, &end_epoch, oldest_map)) {
     return;
   }
 
@@ -1382,7 +1382,7 @@ void PG::build_might_have_unfound()
   dout(10) << __func__ << dendl;
 
   // Make sure that we have past intervals.
-  generate_past_intervals();
+  generate_past_intervals(osd->get_superblock().oldest_map);
 
   // We need to decide who might have unfound objects that we need
   std::map<epoch_t,pg_interval_t>::const_reverse_iterator p = past_intervals.rbegin();
@@ -5379,7 +5379,7 @@ boost::statechart::result PG::RecoveryState::Reset::react(const AdvMap& advmap)
 
   // make sure we have past_intervals filled in.  hopefully this will happen
   // _before_ we are active.
-  pg->generate_past_intervals();
+  pg->generate_past_intervals(pg->osd->get_superblock().oldest_map);
 
   if (pg->should_restart_peering(
 	advmap.up_primary,
@@ -6683,7 +6683,7 @@ PG::RecoveryState::GetInfo::GetInfo(my_context ctx)
   context< RecoveryMachine >().log_enter(state_name);
 
   PG *pg = context< RecoveryMachine >().pg;
-  pg->generate_past_intervals();
+  pg->generate_past_intervals(pg->osd->get_superblock().oldest_map);
   auto_ptr<PriorSet> &prior_set = context< Peering >().prior_set;
 
   assert(pg->blocked_by.empty());

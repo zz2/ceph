@@ -2848,7 +2848,7 @@ void OSD::load_pgs()
     }
   }
   
-  build_past_intervals_parallel();
+  build_past_intervals_parallel(superblock.oldest_map);
 }
 
 
@@ -2869,7 +2869,7 @@ struct pistate {
   int up_primary;
 };
 
-void OSD::build_past_intervals_parallel()
+void OSD::build_past_intervals_parallel(epoch_t oldest_map)
 {
   map<PG*,pistate> pis;
 
@@ -2884,7 +2884,7 @@ void OSD::build_past_intervals_parallel()
       PG *pg = i->second;
 
       epoch_t start, end;
-      if (!pg->_calc_past_interval_range(&start, &end))
+      if (!pg->_calc_past_interval_range(&start, &end, oldest_map))
         continue;
 
       dout(10) << pg->info.pgid << " needs " << start << "-" << end << dendl;
