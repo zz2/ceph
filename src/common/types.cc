@@ -22,11 +22,15 @@
 #define UINT8_MAX (255)
 #endif
 
-const shard_id_t shard_id_t::NO_SHARD(UINT8_MAX);
+#ifndef INT8_MIN
+#define INT8_MIN (-128)
+#endif
+
+const shard_id_t shard_id_t::NO_SHARD(INT8_MIN);
 
 ostream &operator<<(ostream &lhs, const shard_id_t &rhs)
 {
-  return lhs << (unsigned)rhs.id;
+  return lhs << (unsigned)(uint8_t)rhs.id;
 }
 
 #endif
