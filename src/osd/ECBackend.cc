@@ -1746,9 +1746,10 @@ void ECBackend::rollback_append(
 
 void ECBackend::be_deep_scrub(
   const hobject_t &poid,
+  uint32_t seed,
   ScrubMap::object &o,
   ThreadPool::TPHandle &handle) {
-  bufferhash h(-1);
+  bufferhash h(-1); // we always used -1
   int r;
   uint64_t stride = cct->_conf->osd_deep_scrub_stride;
   if (stride % sinfo.get_chunk_size())
@@ -1808,6 +1809,6 @@ void ECBackend::be_deep_scrub(
     o.digest_present = true;
   }
 
-  o.omap_digest = 0;
+  o.omap_digest = seed;
   o.omap_digest_present = true;
 }

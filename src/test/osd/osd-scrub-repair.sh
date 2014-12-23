@@ -91,36 +91,73 @@ function corrupt_and_repair_one() {
     objectstore_tool $dir $osd SOMETHING list-attrs || return 1
     rados --pool $poolname get SOMETHING $dir/COPY || return 1
     diff $dir/ORIGINAL $dir/COPY || return 1
+
+    wait_for_clean || return 1
 }
+
+function TEST_corrupt_and_repair_erasure_coded() {
+    local dir=$1
+    local poolname=ecpool
+    local payload=ABCDEF
+
+    setup $dir || return 1
+    run_mon $dir a || return 1
+    run_osd $dir 0 || return 1
+    run_osd $dir 1 || return 1
+    run_osd $dir 2 || return 1
+    run_osd $dir 3 || return 1
     wait_for_clean || return 1
 
-    ceph osd set noscrub || return 1
-    ceph osd set nodeep-scrub || return 1
+    ceph osd erasure-code-profile set myprofile \
+        k=2 m=2 ruleset-failure-domain=osd || return 1
+    ceph osd pool create $poolname 1 1 erasure myprofile \
+        || return 1
 
-    local payload=ABCDEF
-    echo $payload > $dir/ORIGINAL
+    add_something $dir $poolname
+
+    local primary=$(get_primary $poolname SOMETHING)
+    local -a osds=($(get_osds $poolname SOMETHING | sed -e "s/$primary//"))
+    local not_primary_first=${osds[0]}
+    local not_primary_second=${osds[1]}
+
+    # Reproduces http://tracker.ceph.com/issues/10017
+    corrupt_and_repair_one $dir $poolname $primary  || return 1
+    # Reproduces http://tracker.ceph.com/issues/10409
+    corrupt_and_repair_one $dir $poolname $not_primary_first || return 1
+    corrupt_and_repair_two $dir $poolname $not_primary_first $not_primary_second || return 1
+    corrupt_and_repair_two $dir $poolname $primary $not_primary_first || return 1
+
+    teardown $dir || return 1
+}
+
+function corrupt_and_repair_two() {
+    local dir=$1
+    local poolname=$2
+    local first=$3
+    local second=$4
+
     #
-    # 1) add an object
+    # 1) remove the corresponding file from the OSDs
     #
-    rados --pool $poolname put SOMETHING $dir/ORIGINAL || return 1
+    objectstore_tool $dir $first SOMETHING remove || return 1
+    objectstore_tool $dir $second SOMETHING remove || return 1
     #
-    # 2) remove the corresponding file from the OSD
-    #
-    objectstore_tool $dir $osd SOMETHING remove || return 1
-    #
-    # 3) repair the PG
+    # 2) repair the PG
     #
     local pg=$(get_pg $poolname SOMETHING)
     repair $pg
     #
-    # The file must be back
+    # 3) The files must be back
     #
-    objectstore_tool $dir $osd SOMETHING list-attrs || return 1
+    objectstore_tool $dir $first SOMETHING list-attrs || return 1
+    objectstore_tool $dir $second SOMETHING list-attrs || return 1
+    rados --pool $poolname get SOMETHING $dir/COPY || return 1
+    diff $dir/ORIGINAL $dir/COPY || return 1
 }
 
 main osd-scrub-repair "$@"
 
 # Local Variables:
 # compile-command: "cd ../.. ; make -j4 && \
-#    test/osd/osd-scrub-repair.sh # TEST_corrupt_and_repair_primary_replicated"
+#    test/osd/osd-scrub-repair.sh # TEST_corrupt_and_repair_replicated"
 # End:

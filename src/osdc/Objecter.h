@@ -619,24 +619,30 @@ struct ObjectOperation {
     uint64_t *out_size;
     utime_t *out_mtime;
     std::map<std::string,bufferlist> *out_attrs;
-    bufferlist *out_data, *out_omap_header;
-    std::map<std::string,bufferlist> *out_omap;
+    bufferlist *out_data, *out_omap_header, *out_omap_data;
     vector<snapid_t> *out_snaps;
     snapid_t *out_snap_seq;
+    uint32_t *out_flags;
+    uint32_t *out_data_digest;
+    uint32_t *out_omap_digest;
     int *prval;
     C_ObjectOperation_copyget(object_copy_cursor_t *c,
 			      uint64_t *s,
 			      utime_t *m,
 			      std::map<std::string,bufferlist> *a,
 			      bufferlist *d, bufferlist *oh,
-			      std::map<std::string,bufferlist> *o,
+			      bufferlist *o,
 			      std::vector<snapid_t> *osnaps,
 			      snapid_t *osnap_seq,
+			      uint32_t *flags,
+			      uint32_t *dd,
+			      uint32_t *od,
 			      int *r)
       : cursor(c),
 	out_size(s), out_mtime(m),
 	out_attrs(a), out_data(d), out_omap_header(oh),
-	out_omap(o), out_snaps(osnaps), out_snap_seq(osnap_seq),
+	out_omap_data(o), out_snaps(osnaps), out_snap_seq(osnap_seq),
+	out_flags(flags), out_data_digest(dd), out_omap_digest(od),
 	prval(r) {}
     void finish(int r) {
       if (r < 0)
@@ -655,12 +661,18 @@ struct ObjectOperation {
 	  out_data->claim_append(copy_reply.data);
 	if (out_omap_header)
 	  out_omap_header->claim_append(copy_reply.omap_header);
-	if (out_omap)
-	  *out_omap = copy_reply.omap;
+	if (out_omap_data)
+	  *out_omap_data = copy_reply.omap_data;
 	if (out_snaps)
 	  *out_snaps = copy_reply.snaps;
 	if (out_snap_seq)
 	  *out_snap_seq = copy_reply.snap_seq;
+	if (out_flags)
+	  *out_flags = copy_reply.flags;
+	if (out_data_digest)
+	  *out_data_digest = copy_reply.data_digest;
+	if (out_omap_digest)
+	  *out_omap_digest = copy_reply.omap_digest;
 	*cursor = copy_reply.cursor;
       } catch (buffer::error& e) {
 	if (prval)
@@ -676,9 +688,12 @@ struct ObjectOperation {
 		std::map<std::string,bufferlist> *out_attrs,
 		bufferlist *out_data,
 		bufferlist *out_omap_header,
-		std::map<std::string,bufferlist> *out_omap,
+		bufferlist *out_omap_data,
 		vector<snapid_t> *out_snaps,
 		snapid_t *out_snap_seq,
+		uint32_t *out_flags,
+		uint32_t *out_data_digest,
+		uint32_t *out_omap_digest,
 		int *prval) {
     OSDOp& osd_op = add_op(CEPH_OSD_OP_COPY_GET);
     osd_op.op.copy_get.max = max;
@@ -689,7 +704,9 @@ struct ObjectOperation {
     C_ObjectOperation_copyget *h =
       new C_ObjectOperation_copyget(cursor, out_size, out_mtime,
                                     out_attrs, out_data, out_omap_header,
-				    out_omap, out_snaps, out_snap_seq, prval);
+				    out_omap_data, out_snaps, out_snap_seq,
+				    out_flags, out_data_digest, out_omap_digest,
+				    prval);
     out_bl[p] = &h->bl;
     out_handler[p] = h;
   }
@@ -1648,6 +1665,9 @@ public:
   map<uint64_t, LingerOp*>  linger_ops;
   // we use this just to confirm a cookie is valid before dereferencing the ptr
   set<LingerOp*>            linger_ops_set;
+  int num_linger_callbacks;
+  Mutex linger_callback_lock;
+  Cond linger_callback_cond;
 
   map<ceph_tid_t,PoolStatOp*>    poolstat_ops;
   map<ceph_tid_t,StatfsOp*>      statfs_ops;
@@ -1713,6 +1733,25 @@ public:
   void _linger_ping(LingerOp *info, int r, utime_t sent, uint32_t register_gen);
   int _normalize_watch_error(int r);
 
+  void _linger_callback_queue() {
+    Mutex::Locker l(linger_callback_lock);
+    ++num_linger_callbacks;
+  }
+  void _linger_callback_finish() {
+    Mutex::Locker l(linger_callback_lock);
+    if (--num_linger_callbacks == 0)
+      linger_callback_cond.SignalAll();
+    assert(num_linger_callbacks >= 0);
+  }
+  friend class C_DoWatchError;
+public:
+  void linger_callback_flush() {
+    Mutex::Locker l(linger_callback_lock);
+    while (num_linger_callbacks > 0)
+      linger_callback_cond.Wait(linger_callback_lock);
+  }
+
+private:
   void _check_op_pool_dne(Op *op, bool session_locked);
   void _send_op_map_check(Op *op);
   void _op_cancel_map_check(Op *op);
@@ -1795,6 +1834,8 @@ public:
     timer(cct, timer_lock, false),
     logger(NULL), tick_event(NULL),
     m_request_state_hook(NULL),
+    num_linger_callbacks(0),
+    linger_callback_lock("Objecter::linger_callback_lock"),
     num_homeless_ops(0),
     homeless_session(new OSDSession(cct, -1)),
     mon_timeout(mon_timeout),
@@ -1980,6 +2021,8 @@ public:
     o->priority = op.priority;
     o->snapid = snapid;
     o->outbl = pbl;
+    if (!o->outbl && op.size() == 1 && op.out_bl[0]->length())
+	o->outbl = op.out_bl[0];
     o->out_bl.swap(op.out_bl);
     o->out_handler.swap(op.out_handler);
     o->out_rval.swap(op.out_rval);

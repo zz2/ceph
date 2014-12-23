@@ -327,7 +327,6 @@ public:
   ThreadPool::WorkQueue<PG> &recovery_wq;
   ThreadPool::WorkQueue<PG> &snap_trim_wq;
   ThreadPool::WorkQueue<PG> &scrub_wq;
-  ThreadPool::WorkQueue<PG> &scrub_finalize_wq;
   ThreadPool::WorkQueue<MOSDRepScrub> &rep_scrub_wq;
   GenContextWQ recovery_gen_wq;
   GenContextWQ op_gen_wq;
@@ -914,6 +913,10 @@ protected:
   Mutex osd_lock;			// global lock
   SafeTimer tick_timer;    // safe timer (osd_lock)
 
+  // Tick timer for those stuff that do not need osd_lock
+  Mutex tick_timer_lock;
+  SafeTimer tick_timer_without_osd_lock;
+
   AuthAuthorizeHandlerRegistry *authorize_handler_cluster_registry;
   AuthAuthorizeHandlerRegistry *authorize_handler_service_registry;
 
@@ -940,12 +943,22 @@ protected:
     }
   };
 
+  class C_Tick_WithoutOSDLock : public Context {
+    OSD *osd;
+  public:
+    C_Tick_WithoutOSDLock(OSD *o) : osd(o) {}
+    void finish(int r) {
+      osd->tick_without_osd_lock();
+    }
+  };
+
   Cond dispatch_cond;
   int dispatch_running;
 
   void create_logger();
   void create_recoverystate_perf();
   void tick();
+  void tick_without_osd_lock();
   void _dispatch(Message *m);
   void dispatch_op(OpRequestRef op);
   bool dispatch_op_fast(OpRequestRef& op, OSDMapRef& osdmap);
@@ -2133,50 +2146,6 @@ protected:
       }
     }
   } scrub_wq;
-
-  struct ScrubFinalizeWQ : public ThreadPool::WorkQueue<PG> {
-  private:
-    xlist<PG*> scrub_finalize_queue;
-
-  public:
-    ScrubFinalizeWQ(time_t ti, ThreadPool *tp)
-      : ThreadPool::WorkQueue<PG>("OSD::ScrubFinalizeWQ", ti, ti*10, tp) {}
-
-    bool _empty() {
-      return scrub_finalize_queue.empty();
-    }
-    bool _enqueue(PG *pg) {
-      if (pg->scrub_finalize_item.is_on_list()) {
-	return false;
-      }
-      pg->get("ScrubFinalizeWQ");
-      scrub_finalize_queue.push_back(&pg->scrub_finalize_item);
-      return true;
-    }
-    void _dequeue(PG *pg) {
-      if (pg->scrub_finalize_item.remove_myself()) {
-	pg->put("ScrubFinalizeWQ");
-      }
-    }
-    PG *_dequeue() {
-      if (scrub_finalize_queue.empty())
-	return NULL;
-      PG *pg = scrub_finalize_queue.front();
-      scrub_finalize_queue.pop_front();
-      return pg;
-    }
-    void _process(PG *pg) {
-      pg->scrub_finalize();
-      pg->put("ScrubFinalizeWQ");
-    }
-    void _clear() {
-      while (!scrub_finalize_queue.empty()) {
-	PG *pg = scrub_finalize_queue.front();
-	scrub_finalize_queue.pop_front();
-	pg->put("ScrubFinalizeWQ");
-      }
-    }
-  } scrub_finalize_wq;
 
   struct RepScrubWQ : public ThreadPool::WorkQueue<MOSDRepScrub> {
   private: 

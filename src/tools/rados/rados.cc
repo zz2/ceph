@@ -19,6 +19,7 @@
 #include "rados_sync.h"
 using namespace librados;
 
+#include "librados/RadosWhereis.h"
 #include "common/config.h"
 #include "common/ceph_argparse.h"
 #include "global/global_init.h"
@@ -85,6 +86,7 @@ void usage(ostream& out)
 "   mksnap <snap-name>               create snap <snap-name>\n"
 "   rmsnap <snap-name>               remove snap <snap-name>\n"
 "   rollback <obj-name> <snap-name>  roll back object to snap <snap-name>\n"
+"   whereis [--dns] <obj-name>       where is an object stored in a pool (optionally do reverse dns)\n"
 "\n"
 "   listsnaps <obj-name>             list the snapshots of this object\n"
 "   bench <seconds> write|seq|rand [-t concurrent_operations] [--no-cleanup] [--run-name run_name]\n"
@@ -282,93 +284,12 @@ static int do_get(IoCtx& io_ctx, const char *objname, const char *outfile, unsig
   return ret;
 }
 
-static int do_copy(IoCtx& io_ctx, const char *objname, IoCtx& target_ctx, const char *target_obj)
+static int do_copy(IoCtx& io_ctx, const char *objname,
+		   IoCtx& target_ctx, const char *target_obj)
 {
-  string oid(objname);
-  bufferlist outdata;
-  librados::ObjectReadOperation read_op;
-  string start_after;
-
-#define COPY_CHUNK_SIZE (4 * 1024 * 1024)
-  read_op.read(0, COPY_CHUNK_SIZE, &outdata, NULL);
-
-  map<std::string, bufferlist> attrset;
-  read_op.getxattrs(&attrset, NULL);
-
-  bufferlist omap_header;
-  read_op.omap_get_header(&omap_header, NULL);
-
-#define OMAP_CHUNK 1000
-  map<string, bufferlist> omap;
-  read_op.omap_get_vals(start_after, OMAP_CHUNK, &omap, NULL);
-
-  bufferlist opbl;
-  int ret = io_ctx.operate(oid, &read_op, &opbl);
-  if (ret < 0) {
-    return ret;
-  }
-
-  librados::ObjectWriteOperation write_op;
-  string target_oid(target_obj);
-
-  /* reset dest if exists */
-  write_op.create(false);
-  write_op.remove();
-
-  write_op.write_full(outdata);
-  write_op.omap_set_header(omap_header);
-
-  map<std::string, bufferlist>::iterator iter;
-  for (iter = attrset.begin(); iter != attrset.end(); ++iter) {
-    write_op.setxattr(iter->first.c_str(), iter->second);
-  }
-  if (!omap.empty()) {
-    write_op.omap_set(omap);
-  }
-  ret = target_ctx.operate(target_oid, &write_op);
-  if (ret < 0) {
-    return ret;
-  }
-
-  uint64_t off = 0;
-
-  while (outdata.length() == COPY_CHUNK_SIZE) {
-    off += outdata.length();
-    outdata.clear();
-    ret = io_ctx.read(oid, outdata, COPY_CHUNK_SIZE, off); 
-    if (ret < 0)
-      goto err;
-
-    ret = target_ctx.write(target_oid, outdata, outdata.length(), off);
-    if (ret < 0)
-      goto err;
-  }
-
-  /* iterate through source omap and update target. This is not atomic */
-  while (omap.size() == OMAP_CHUNK) {
-    /* now start_after should point at the last entry */    
-    map<string, bufferlist>::iterator iter = omap.end();
-    --iter;
-    start_after = iter->first;
-
-    omap.clear();
-    ret = io_ctx.omap_get_vals(oid, start_after, OMAP_CHUNK, &omap);
-    if (ret < 0)
-      goto err;
-
-    if (omap.empty())
-      break;
-
-    ret = target_ctx.omap_set(target_oid, omap);
-    if (ret < 0)
-      goto err;
-  }
-
-  return 0;
-
-err:
-  target_ctx.remove(target_oid);
-  return ret;
+  ObjectWriteOperation op;
+  op.copy_from(objname, io_ctx, 0);
+  return target_ctx.operate(target_obj, &op);
 }
 
 static int do_clone_data(IoCtx& io_ctx, const char *objname, IoCtx& target_ctx, const char *target_obj)
@@ -1236,6 +1157,7 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
 
   bool show_time = false;
   bool wildcard = false;
+  bool reverse_dns = false;
 
   const char* run_name = NULL;
   const char* prefix = NULL;
@@ -1379,6 +1301,10 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
       formatter = new XMLFormatter(pretty_format);
     else if (strcmp(format, "json") == 0)
       formatter = new JSONFormatter(pretty_format);
+    else if (strcmp(format, "table") == 0)
+      formatter = new TableFormatter();
+    else if (strcmp(format, "table-kv") == 0)
+      formatter = new TableFormatter(true);
     else {
       cerr << "unrecognized format: " << format << std::endl;
       return -EINVAL;
@@ -1389,6 +1315,10 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
     nspace = i->second;
   }
 
+  i = opts.find("dns");
+  if (i != opts.end()) {
+    reverse_dns = true;
+  }
 
   // open rados
   ret = rados.init_with_context(g_ceph_context);
@@ -2077,7 +2007,33 @@ static int rados_tool_common(const std::map < std::string, std::string > &opts,
       goto out;
     }
   }
+  else if (strcmp(nargs[0], "whereis") == 0) {
+    if (!pool_name || nargs.size() < 2)
+      usage_exit();
+    vector<const char *>::iterator iter = nargs.begin();
+    ++iter;
+    for (; iter != nargs.end(); ++iter) {
+      const string & oid = *iter;
 
+      std::vector<librados::whereis_t> locations;
+      int retc;
+      if ((retc = librados::Rados::whereis(io_ctx, oid, locations))) {
+        cerr << "failed to locate " << pool_name << "/" << oid << ": " << cpp_strerror(ret) << std::endl;
+        goto out;
+      } else {
+	if (!formatter) {
+	  formatter = new TableFormatter();
+	}
+	
+	std::vector<librados::whereis_t>::iterator it;
+
+	for (it=locations.begin(); it!=locations.end(); ++it) {
+	  librados::RadosWhereis::dump(*it, reverse_dns, formatter);
+	}
+	formatter->flush(cout);
+      }
+    }
+  }
   else if (strcmp(nargs[0], "tmap") == 0) {
     if (nargs.size() < 3)
       usage_exit();
@@ -2715,6 +2671,8 @@ int main(int argc, const char **argv)
       opts["show-time"] = "true";
     } else if (ceph_argparse_flag(args, i, "--no-cleanup", (char*)NULL)) {
       opts["no-cleanup"] = "true";
+    } else if (ceph_argparse_flag(args, i, "--dns", (char*)NULL)) {
+      opts["dns"] = "true";
     } else if (ceph_argparse_witharg(args, i, &val, "--run-name", (char*)NULL)) {
       opts["run-name"] = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--prefix", (char*)NULL)) {

@@ -32,6 +32,7 @@ namespace librados
   class RadosClient;
   class ListObjectImpl;
   struct NObjectIteratorImpl;
+  class RadosWhereis;
 
   typedef void *list_ctx_t;
   typedef uint64_t auid_t;
@@ -116,6 +117,16 @@ namespace librados
   };
 
   // DEPRECATED; Use NObjectIterator
+  typedef struct whereis {
+    int64_t osd_id;                              //< ID of the OSD hosting this object
+    std::string osd_state;                       //< state of the OSD - either 'active' or 'inactive'
+    int64_t pg_seed;                             //< Seed of the PG hosting this object
+    std::string ip_string;                       //< Ip as string
+    std::vector<std::string> host_names;         //< optional reverse DNS HostNames
+    std::map<std::string, std::string> user_map; //< optional user KV map
+    void resolve();                              //< reverse DNS OSD IPs and store in HostNames
+  } whereis_t;
+
   class CEPH_RADOS_API ObjectIterator : public std::iterator <std::forward_iterator_tag, std::pair<std::string, std::string> > {
   public:
     static const ObjectIterator __EndObjectIterator;
@@ -590,6 +601,10 @@ namespace librados
    * rados.ioctx_create("my_pool", p);
    * p->stat(&stats);
    * ... etc ...
+   *
+   * NOTE: be sure to call watch_flush() prior to destroying any IoCtx
+   * that is used for watch events to ensure that racing callbacks
+   * have completed.
    */
   class CEPH_RADOS_API IoCtx
   {
@@ -1030,6 +1045,7 @@ namespace librados
 
     friend class Rados; // Only Rados can use our private constructor to create IoCtxes.
     friend class libradosstriper::RadosStriper; // Striper needs to see our IoCtxImpl
+    friend class librados::RadosWhereis; // Whereis class needs to see our IoCtxImpl
     friend class ObjectWriteOperation;  // copy_from needs to see our IoCtxImpl
 
     IoCtxImpl *io_ctx_impl;
@@ -1051,6 +1067,7 @@ namespace librados
     config_t cct();
     int connect();
     void shutdown();
+    int watch_flush();
     int conf_read_file(const char * const path) const;
     int conf_parse_argv(int argc, const char ** argv) const;
     int conf_parse_argv_remainder(int argc, const char ** argv,
@@ -1094,6 +1111,9 @@ namespace librados
 		       std::map<std::string, stats_map>& stats);
     int cluster_stat(cluster_stat_t& result);
     int cluster_fsid(std::string *fsid);
+
+    //  'whereis' of objects
+    static int whereis(IoCtx &ioctx, const std::string &oid, std::vector<whereis_t> &locations);
 
     /// get/wait for the most recent osdmap
     int wait_for_latest_osdmap();
