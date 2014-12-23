@@ -865,6 +865,7 @@ private:
     Op* _get_next_op() {
       if (op_ptr.length() == 0 || op_ptr.offset() >= op_ptr.length()) {
         op_ptr = bufferptr(sizeof(Op) * OPS_PER_PTR);
+	op_ptr.zero();
       }
       bufferptr ptr(op_ptr, 0, sizeof(Op));
       op_bl.append(ptr);
