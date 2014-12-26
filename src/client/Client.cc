@@ -9148,7 +9148,18 @@ int Client::_rmdir(Inode *dir, const char *name, int uid, int gid)
 
   res = make_request(req, uid, gid);
 
-  trim_cache();
+  if (!res) {
+    if (in->dir && !in->dir->dentry_list.empty()) {
+      for (xlist<Dentry*>::iterator p = in->dir->dentry_list.begin();
+	   !p.end(); ) {
+	Dentry *dn = *p;
+	++p;
+	if (dn->lru_is_expireable())
+	  unlink(dn, false, false);  // close dir, drop dentry
+      }
+    }
+    trim_cache();
+  }
   ldout(cct, 3) << "rmdir(" << path << ") = " << res << dendl;
   return res;
 
