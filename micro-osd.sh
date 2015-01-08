@@ -85,6 +85,7 @@ ceph-osd --id ${OSD_ID} --mkfs
 ceph-osd --id ${OSD_ID}
 
 # check that it works
+rados mkpool data
 rados --pool data put group /etc/group
 rados --pool data get group ${DIR}/group
 diff /etc/group ${DIR}/group
