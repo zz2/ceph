@@ -23,6 +23,9 @@ su_sbin_PROGRAMS += mount.ceph
 endif # LINUX
 su_sbin_SCRIPTS += mount.fuse.ceph
 
+ceph_lich_SOURCES = ceph_lich.cc
+ceph_lich_LDADD = $(LIBMON) $(LIBOS) $(CEPH_GLOBAL) $(LIBCOMMON) $(LIBAUTH) $(LIBCOMMON) $(LIBMON_TYPES)
+bin_PROGRAMS += ceph-lich
 
 if WITH_MON
 
