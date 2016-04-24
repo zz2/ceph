@@ -24,6 +24,8 @@
 #include <poll.h>
 #include <iostream>
 #include <string>
+#include <arpa/inet.h>
+
 using namespace std;
 
 #include "common/config.h"
@@ -519,7 +521,7 @@ int accept(pipe_t *pipe, uint64_t *supported)
 	int ret;
 	// vars
 	bufferlist addrs;
-	entity_addr_t socket_addr;
+	entity_addr_t socket_addr, socket_addr_local;
 	socklen_t len;
 	int r;
 	char banner[strlen(CEPH_BANNER)+1];
@@ -556,7 +558,20 @@ int accept(pipe_t *pipe, uint64_t *supported)
 
 	// and my addr
 	printf("add my addr\n");
+	char serv_ip[20], guest_ip[20];
+	//((sockaddr_in)(socket_addr_local.ss_addr())).sin_family = AF_INET; 
+	//socket_addr_local.ss_addr().sin_addr.s_addr = htonl(INADDR_ANY); 
+	//socket_addr_local.ss_addr().sin_addr.s_addr = inet_addr("192.168.120.31"); 
+	//socket_addr_local.ss_addr().sin_port = htons(6789);; 
 	len = sizeof(socket_addr.ss_addr());
+	r = ::getsockname(pipe->accept_sd, (sockaddr*)&socket_addr_local.ss_addr(), &len);
+	if (r < 0) {
+		printf("accept  failed to getpeername \n");
+		ret = errno;
+		goto err_ret;
+	}
+	::encode(socket_addr_local, addrs);
+
 	r = ::getpeername(pipe->accept_sd, (sockaddr*)&socket_addr.ss_addr(), &len);
 	if (r < 0) {
 		printf("accept  failed to getpeername \n");
@@ -570,9 +585,10 @@ int accept(pipe_t *pipe, uint64_t *supported)
 		ret = errno;
 		goto err_ret;
 	}
-	printf("write my self addr %s\n", addrs.c_str());
-
-	printf("read banner\n");
+	//inet_ntop(AF_INET, &((sockaddr*)(&socket_addr_local.ss_addr())->sin_addr), serv_ip, sizeof(serv_ip));
+	//inet_ntop(AF_INET, &((sockaddr*)(&socket_addr.ss_addr())->sin_addr), guest_ip, sizeof(serv_ip));
+	//printf("host: %s, guest: %s\n", serv_ip, guest_ip);
+	//printf("read banner\n");
 	// identify peer
 	if (tcp_read(banner, strlen(CEPH_BANNER), pipe) < 0) {
 		printf("accept couldn't read banner\n");
@@ -623,10 +639,15 @@ int accept(pipe_t *pipe, uint64_t *supported)
 
 		//cluster_protocol(0),
 		memset(&reply, 0, sizeof(reply));
-		reply.protocol_version = 0;
+		reply.protocol_version = 15;
 		if (connect.protocol_version != reply.protocol_version) {
 			reply.tag = CEPH_MSGR_TAG_BADPROTOVER;
-			printf("CEPH_MSGR_TAG_BADPROTOVER\n");
+			printf("CEPH_MSGR_TAG_BADPROTOVER, connect: %d,  reply: %d\n", connect.protocol_version, reply.protocol_version);
+		}
+
+    		if (connect.authorizer_protocol == CEPH_AUTH_CEPHX) {
+			printf("fuck\n");
+			exit(1);
 		}
 
 		connect_seq = connect.connect_seq + 1;
@@ -635,13 +656,11 @@ int accept(pipe_t *pipe, uint64_t *supported)
 		//state = STATE_OPEN;
 
 		reply.tag = (reply_tag ? reply_tag : CEPH_MSGR_TAG_READY);
-		reply.features = *supported;
+		reply.features = (*supported) * ((uint64_t)connect.features);
 		reply.global_seq = ++global_seq;
 		reply.connect_seq = connect_seq;
 		reply.flags = 0;
 		reply.authorizer_len = authorizer_reply.length();
-
-		*supported = (*supported) * ((uint64_t)connect.features);
 
 		printf("send reply\n");
 		r = tcp_write((char*)&reply, sizeof(reply), pipe);
