@@ -15,7 +15,13 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
+#include <sys/uio.h>
+#include <limits.h>
+#include <poll.h>
 #include <iostream>
 #include <string>
 using namespace std;
@@ -30,6 +36,8 @@ using namespace std;
 
 #include "msg/Messenger.h"
 #include "include/CompatSet.h"
+#include "msg/simple/PipeConnection.h"
+
 
 #include "common/ceph_argparse.h"
 #include "common/pick_address.h"
@@ -45,28 +53,150 @@ using namespace std;
 
 #define dout_subsys ceph_subsys_mon
 
+typedef struct {
+	int accept_sd;
+    	size_t recv_ofs;
+    	size_t recv_len;
+	int ms_tcp_read_timeout = 900;//秒
+	int timeout = 900000;//毫秒
+} pipe_t;
+
+#if 0
 Message *fetch_msg(Message *m, Message *rsp_m)
 {
 	printf("msg\n");
 	return m;
 }
+#endif
 
-int tcp_read(char *buf, unsigned len, int accept_sd)
+int tcp_read_wait(pipe_t *pipe)
+{
+	struct pollfd pfd;
+	short evmask;
+	pfd.fd = pipe->accept_sd;
+	pfd.events = POLLIN;
+#if defined(__linux__)
+	pfd.events |= POLLRDHUP;
+#endif
+
+	if (pipe->accept_sd < 0)
+		return -1;
+
+	if (pipe->recv_len > pipe->recv_ofs) {
+		return 0;
+	}
+
+	if (poll(&pfd, 1, pipe->timeout) <= 0) {
+		printf("pipe timeout\n");
+		return -1;
+	}
+
+	evmask = POLLERR | POLLHUP | POLLNVAL;
+#if defined(__linux__)
+	evmask |= POLLRDHUP;
+#endif
+
+	if (pfd.revents & POLLRDHUP) {
+		printf("POLLRDHUP\n"); return -1;
+	}
+
+	if (pfd.revents & POLLERR) {
+		printf("pollerr\n"); return -1;
+	}
+	if (pfd.revents & POLLHUP) {
+		printf("pollHUP\n"); return -1;
+	}
+
+	if (pfd.revents & POLLNVAL) {
+		printf("POLLHUP\n"); return -1;
+	}
+
+	if (pfd.revents & evmask) {
+		printf("pipe revents error, hup, nval, %d\n", pfd.revents);
+		return -1;
+	}
+
+	if (!(pfd.revents & POLLIN)) {
+		printf("pipe revents not poolin\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static void alloc_aligned_buffer(bufferlist& data, unsigned len, unsigned off)
+{
+  // create a buffer to read into that matches the data alignment
+  unsigned left = len;
+  if (off & ~CEPH_PAGE_MASK) {
+    // head
+    unsigned head = 0;
+    head = MIN(CEPH_PAGE_SIZE - (off & ~CEPH_PAGE_MASK), left);
+    data.push_back(buffer::create(head));
+    left -= head;
+  }
+  unsigned middle = left & CEPH_PAGE_MASK;
+  if (middle > 0) {
+    data.push_back(buffer::create_page_aligned(middle));
+    left -= middle;
+  }
+  if (left) {
+    data.push_back(buffer::create(left));
+  }
+}
+
+int tcp_read_nonblocking(char *buf, unsigned len, pipe_t *pipe)
 {
 	int ret;
 	ssize_t got;
 
-	while (len > 0) {
 again:
-		got = ::recv(accept_sd, buf, len, MSG_WAITALL);
-		if (got < 0) {
-			if (errno == EAGAIN || errno == EINTR) {
-				goto again;
-			}
-			printf("recv error\n");
-			ret = got;
+	got = ::recv(pipe->accept_sd, buf, len, MSG_DONTWAIT);
+	if (got < 0) {
+		if (errno == EAGAIN || errno == EINTR) {
+			goto again;
+		}
+		printf("recv error\n");
+		ret = got;
+		goto err_ret;
+	}
+	printf("recv got : %d\n", (int)got);
+
+	return got;
+err_ret:
+	return ret;
+}
+
+int tcp_read(char *buf, unsigned len, pipe_t *pipe)
+{
+	int ret;
+	ssize_t got;
+
+	if (pipe->accept_sd < 0) {
+		ret = -1;
+		printf("pipe->accept_sd < 0\n");
+		goto err_ret;
+	}
+
+	while (len > 0) {
+		if (tcp_read_wait(pipe) < 0) {
+			ret = -1;
 			goto err_ret;
 		}
+
+		got = tcp_read_nonblocking(buf, len, pipe);
+		if (got < 0) {
+			ret = -1;
+			goto err_ret;
+		}
+
+		if (got == 0) {
+			printf("poll() said there was data, but we didn't read any - peer\n");
+			ret = -1;
+			goto err_ret;
+		}
+
+		printf("recv got : %d\n", (int)got);
 
 		len -= got;
     		buf += got;
@@ -77,11 +207,29 @@ err_ret:
 	return ret;
 }
 
-int tcp_write(const char *buf, unsigned len, int accept_sd)
+int tcp_write(const char *buf, unsigned len, pipe_t *pipe)
 {
-    	int did, ret;
+	int did, ret;
+	struct pollfd pfd;
+
+	pfd.fd = pipe->accept_sd;
+	pfd.events = POLLOUT | POLLHUP | POLLNVAL | POLLERR;
+#if defined(__linux__)
+	pfd.events |= POLLRDHUP;
+#endif
+
+	if (pipe->accept_sd < 0)
+		return -1;
+
+	if (poll(&pfd, 1, -1) < 0)
+		return -1;
+
+	if (!(pfd.revents & POLLOUT))
+		return -1;
+
+  	assert(len > 0);
 	while (len > 0) {
-    		did = ::send(accept_sd, buf, len, MSG_NOSIGNAL);
+		did = ::send(pipe->accept_sd, buf, len, MSG_NOSIGNAL);
     		if (did < 0) {
 			ret = did;
 			goto err_ret;
@@ -95,7 +243,6 @@ int tcp_write(const char *buf, unsigned len, int accept_sd)
 err_ret:
 	return ret;
 }
-
 
 int do_sendmsg(struct msghdr *msg, unsigned len, bool more, int accept_sd)
 {
@@ -146,7 +293,7 @@ int write_keepalive2(char tag, const utime_t& t, int accept_sd)
 	msg.msg_iov = msgvec;
 	msg.msg_iovlen = 2;
 	t.encode_timeval(&ts);
-	if (do_sendmsg(&msg, 1 + sizeof(ts), false) < 0) {
+	if (do_sendmsg(&msg, 1 + sizeof(ts), false, accept_sd) < 0) {
 		ret = -1;
 		goto err_ret;
 	}
@@ -174,7 +321,7 @@ int write_ack(uint64_t seq, int accept_sd)
 	msg.msg_iovlen = 2;
 
 	len = sizeof(s) + 1;
-	if (do_sendmsg(msg, len, true, accept_sd) < 0) {
+	if (do_sendmsg(&msg, len, true, accept_sd) < 0) {
 		ret = -1;
 		goto err_ret;
 	}
@@ -184,32 +331,33 @@ err_ret:
 	return ret;
 }
 
-int read_message(Message **pm, PipeConnectionRef connection_state, int accept_sd)
+int read_message(Message **pm, uint64_t *supported, pipe_t *pipe)
 {
 	int ret = -1;
 	ceph_msg_header header; 
 	ceph_msg_footer footer;
-	__u32 header_crc = 0;
-    	ceph_msg_header_old oldheader;
+	__u32 header_crc;
 
 	bufferlist front, middle, data;
 	int front_len, middle_len;
 	unsigned data_len, data_off;
 	int aborted;
 	Message *message;
-	utime_t recv_stamp = ceph_clock_now(msgr->cct);
+	utime_t recv_stamp = ceph_clock_now(NULL);
 	uint64_t message_size;
 	utime_t throttle_stamp;
+    	ceph_msg_header_old oldheader;
 
-	if (connection_state->has_feature(CEPH_FEATURE_NOSRCADDR)) {
-		if (tcp_read((char*)&header, sizeof(header)) < 0) {
+	header_crc = 0;
+	if (*supported & CEPH_FEATURE_NOSRCADDR) {
+		if (tcp_read((char*)&header, sizeof(header), pipe) < 0) {
 			ret = -1;
 			printf("read header error\n");;
 			goto err_ret;
 		}
 		header_crc = ceph_crc32c(0, (unsigned char *)&header, sizeof(header) - sizeof(header.crc));
 	} else {
-		if (tcp_read((char*)&oldheader, sizeof(oldheader)) < 0) {
+		if (tcp_read((char*)&oldheader, sizeof(oldheader), pipe) < 0) {
 			ret = -1;
 			printf("read oldheader error\n");;
 			goto err_ret;
@@ -225,13 +373,13 @@ int read_message(Message **pm, PipeConnectionRef connection_state, int accept_sd
   	message_size = header.front_len + header.middle_len + header.data_len;
   	if (message_size) {
 	}
-	throttle_stamp = ceph_clock_now(msgr->cct);
+	throttle_stamp = ceph_clock_now(NULL);
 
   	// read front
 	front_len = header.front_len;
 	if (front_len) {
 		bufferptr bp = buffer::create(front_len);
-		if (tcp_read(bp.c_str(), front_len) < 0) {
+		if (tcp_read(bp.c_str(), front_len, pipe) < 0) {
 			printf("read front error\n");
 			ret = -1;
 			goto err_ret;
@@ -244,10 +392,10 @@ int read_message(Message **pm, PipeConnectionRef connection_state, int accept_sd
 	middle_len = header.middle_len;
 	if (middle_len) {
 		bufferptr bp = buffer::create(middle_len);
-		if (tcp_read(bp.c_str(), middle_len) < 0) {
+		if (tcp_read(bp.c_str(), middle_len, pipe) < 0) {
 			printf("read middle error\n");
 			ret = -1;
-			goto ret;
+			goto err_ret;
 		}
 		middle.push_back(std::move(bp));
 		printf("reader got middle %d\n", middle.length());
@@ -262,45 +410,27 @@ int read_message(Message **pm, PipeConnectionRef connection_state, int accept_sd
 
 		bufferlist newbuf, rxbuf;
 		bufferlist::iterator blp;
-		int rxbuf_version = 0;
+		//int rxbuf_version = 0;
 
 		while (left > 0) {
 			// wait for data
-			if (tcp_read_wait() < 0)
-				goto out_dethrottle;
+			//if (tcp_read_wait() < 0)
 
 			// get a buffer
-			connection_state->lock.Lock();
-			map<ceph_tid_t,pair<bufferlist,int> >::iterator p = connection_state->rx_buffers.find(header.tid);
-			if (p != connection_state->rx_buffers.end()) {
-				if (rxbuf.length() == 0 || p->second.second != rxbuf_version) {
-					cout << "reader seleting rx buffer v " << p->second.second
-						<< " at offset " << offset
-						<< " len " << p->second.first.length() << endl;
-					rxbuf = p->second.first;
-					rxbuf_version = p->second.second;
-					// make sure it's big enough
-					if (rxbuf.length() < data_len)
-						rxbuf.push_back(buffer::create(data_len - rxbuf.length()));
-					blp = p->second.first.begin();
-					blp.advance(offset);
-				}
-			} else {
-				if (!newbuf.length()) {
-					cout(msgr->cct,20) << "reader allocating new rx buffer at offset " << offset << endl;
-					alloc_aligned_buffer(newbuf, data_len, data_off);
-					blp = newbuf.begin();
-					blp.advance(offset);
-				}
+			if (!newbuf.length()) {
+				printf("reader allocating new rx buffer at offset %d \n", (int)offset);
+				alloc_aligned_buffer(newbuf, data_len, data_off);
+				blp = newbuf.begin();
+				blp.advance(offset);
 			}
 			bufferptr bp = blp.get_current_ptr();
+
 			int read = MIN(bp.length(), left);
-			cout << "reader reading nonblocking into " << (void*)bp.c_str() << " len " << bp.length() << endl;
-			ssize_t got = tcp_read(bp.c_str(), read, accept_sd);
-			cout(msgr->cct,30) << "reader read " << got << " of " << read << endl;
-			connection_state->lock.Unlock();
+			//ldout(NULL, -1) << "reader reading nonblocking into " << (void*)bp.c_str() << " len " << bp.length() << dendl;
+			ssize_t got = tcp_read(bp.c_str(), read, pipe);
+			//ldout(NULL, -1) << "reader read " << got << " of " << read << dendl;
 			if (got < 0) {
-				cout << "tcp read bp err" << endl;
+				printf("tcp read bp err\n");
 				ret = -1;
 				goto err_ret;
 			}
@@ -315,17 +445,17 @@ int read_message(Message **pm, PipeConnectionRef connection_state, int accept_sd
 	}
 
 	// footer
-	if (connection_state->has_feature(CEPH_FEATURE_MSG_AUTH)) {
-		if (tcp_read((char*)&footer, sizeof(footer)) < 0) {
+	if (*supported & CEPH_FEATURE_MSG_AUTH) {
+		if (tcp_read((char*)&footer, sizeof(footer), pipe) < 0) {
 			ret = -1;
-			cout << "read footer error" << endl;
+			printf("read footer error\n");
 			goto err_ret;
 		}
 	} else {
 		ceph_msg_footer_old old_footer;
-		if (tcp_read((char*)&old_footer, sizeof(old_footer)) < 0) {
+		if (tcp_read((char*)&old_footer, sizeof(old_footer), pipe) < 0) {
 			ret = -1;
-			cout << "read footer error" << endl;
+			printf("read footer error\n");
 			goto err_ret;
 		}
 		footer.front_crc = old_footer.front_crc;
@@ -336,10 +466,11 @@ int read_message(Message **pm, PipeConnectionRef connection_state, int accept_sd
 	}
 
 	aborted = (footer.flags & CEPH_MSG_FOOTER_COMPLETE) == 0;
-	cout << "aborted = " << aborted << endl;
+	//ldout(NULL, -1) << "aborted = " << aborted << dendl;
 	if (aborted) {
-		cout << "reader got " << front.length() << " + " << middle.length() << " + " << data.length()
-			<< " byte message.. ABORTED" << endl;
+		//ldout(NULL, -1) << "reader got " << front.length() << " + " << middle.length() << " + " << data.length()
+			//<< " byte message.. ABORTED" << dendl;
+		printf("aborted\n");
 		ret = 0;
 		goto out;
 	}
@@ -355,7 +486,7 @@ int read_message(Message **pm, PipeConnectionRef connection_state, int accept_sd
 	}
 
   	message->set_recv_stamp(recv_stamp);
-  	message->set_recv_complete_stamp(ceph_clock_now(msgr->cct));
+  	message->set_recv_complete_stamp(ceph_clock_now(NULL));
 
   	*pm = message;
 out:
@@ -383,7 +514,7 @@ int set_socket_options(int sd)
 	return 0;
 }
 
-int accept(int accept_sd, PipeConnectionRef connection_state)
+int accept(pipe_t *pipe, uint64_t *supported)
 {
 	int ret;
 	// vars
@@ -397,86 +528,105 @@ int accept(int accept_sd, PipeConnectionRef connection_state)
 	ceph_msg_connect_reply reply;
 	bufferptr bp;
 	bufferlist authorizer, authorizer_reply;
-	bool authorizer_valid;
-	uint64_t feat_missing;
-	bool replaced = false;
-	bool is_reset_from_peer = false;
+	//bool authorizer_valid;
+	//uint64_t feat_missing;
+	//bool replaced = false;
+	//bool is_reset_from_peer = false;
 	CryptoKey session_key;
-	int removed; // single-use down below
+	//int removed; // single-use down below
     	entity_addr_t peer_addr;
-    	__u32 connect_seq, peer_global_seq, global_seq = 0;
+    	__u32 connect_seq, global_seq, peer_global_seq, global_se_;
   	int reply_tag = 0;
-  	uint64_t existing_seq = -1;
+  	//uint64_t existing_seq = -1;
     	//Messenger::Policy policy;
-
-  	set_socket_options(accept_sd);
+	
+	global_seq = 0;
+	peer_global_seq = 0;
+	global_se_ = 0;
+  	set_socket_options(pipe->accept_sd);
 
   	// announce myself.
-	r = tcp_write(CEPH_BANNER, strlen(CEPH_BANNER), accept_sd);
+	printf("announce myself\n");
+	r = tcp_write(CEPH_BANNER, strlen(CEPH_BANNER), pipe);
 	if (r < 0) {
 		printf("accept couldn't write banner\n");
+		ret = errno;
 		goto err_ret;
 	}
 
 	// and my addr
+	printf("add my addr\n");
 	len = sizeof(socket_addr.ss_addr());
-	r = ::getpeername(accept_sd, (sockaddr*)&socket_addr.ss_addr(), &len);
+	r = ::getpeername(pipe->accept_sd, (sockaddr*)&socket_addr.ss_addr(), &len);
 	if (r < 0) {
 		printf("accept  failed to getpeername \n");
+		ret = errno;
 		goto err_ret;
 	}
 	::encode(socket_addr, addrs);
-  	r = tcp_write(addrs.c_str(), addrs.length(), accept_sd);
+  	r = tcp_write(addrs.c_str(), addrs.length(), pipe);
 	if (r < 0) {
 		printf("accep faild to getpeername\n");
+		ret = errno;
 		goto err_ret;
 	}
+	printf("write my self addr %s\n", addrs.c_str());
 
+	printf("read banner\n");
 	// identify peer
-	if (tcp_read(banner, strlen(CEPH_BANNER)) < 0) {
+	if (tcp_read(banner, strlen(CEPH_BANNER), pipe) < 0) {
 		printf("accept couldn't read banner\n");
+		ret = 1;
 		goto err_ret;
 	}
 	if (memcmp(banner, CEPH_BANNER, strlen(CEPH_BANNER))) {
 		banner[strlen(CEPH_BANNER)] = 0;
 		printf("accept peer sent bad banner %s, need: %s\n",  banner, CEPH_BANNER);
+		ret = 1;
 		goto err_ret;
 	}
+	printf("read banner, %s\n", banner);
 
 	{
 		bufferptr tp(sizeof(peer_addr));
 		addrbl.push_back(std::move(tp));
 	}
-	if (tcp_read(addrbl.c_str(), addrbl.length(), accept_sd) < 0) {
-		printf("accept couldn't read peer_addr\n");
+
+	printf("read peer addr\n");
+	if (tcp_read(addrbl.c_str(), addrbl.length(), pipe) < 0) {
+		ret = 1;
+		printf("accept couldn't read peer_addr, %d\n", ret);
 		goto err_ret;
 	}
 
 	while (1) {
-		if (tcp_read((char*)&connect, sizeof(connect), accept_sd) < 0) {
+		printf("read connect\n");
+		if (tcp_read((char*)&connect, sizeof(connect), pipe) < 0) {
 			printf("accept couldn't read connect\n");
+			ret = 1;
 			goto err_ret;
 		}
 
     		connect.features = ceph_sanitize_features(connect.features);
 		authorizer.clear();
 		if (connect.authorizer_len) {
+			printf("read auth\n");
 			bp = buffer::create(connect.authorizer_len);
-			if (tcp_read(bp.c_str(), connect.authorizer_len, accept_sd) < 0) {
+			if (tcp_read(bp.c_str(), connect.authorizer_len, pipe) < 0) {
 				printf("accept couldn't read connect authorizer\n");
+				ret = 1;
 				goto err_ret;
 			}
 			authorizer.push_back(std::move(bp));
 			authorizer_reply.clear();
 		}
 
-
 		//cluster_protocol(0),
 		memset(&reply, 0, sizeof(reply));
 		reply.protocol_version = 0;
 		if (connect.protocol_version != reply.protocol_version) {
 			reply.tag = CEPH_MSGR_TAG_BADPROTOVER;
-			goto reply;
+			printf("CEPH_MSGR_TAG_BADPROTOVER\n");
 		}
 
 		connect_seq = connect.connect_seq + 1;
@@ -484,23 +634,17 @@ int accept(int accept_sd, PipeConnectionRef connection_state)
 		//assert(state == STATE_ACCEPTING);
 		//state = STATE_OPEN;
 
-		uint64_t supported =
-			CEPH_FEATURE_UID |
-			CEPH_FEATURE_NOSRCADDR |
-			DEPRECATED_CEPH_FEATURE_MONCLOCKCHECK |
-			CEPH_FEATURE_PGID64 |
-			CEPH_FEATURE_MSG_AUTH;
-
 		reply.tag = (reply_tag ? reply_tag : CEPH_MSGR_TAG_READY);
-		reply.features = supported;
+		reply.features = *supported;
 		reply.global_seq = ++global_seq;
 		reply.connect_seq = connect_seq;
 		reply.flags = 0;
 		reply.authorizer_len = authorizer_reply.length();
 
-  		connection_state->set_features((uint64_t)reply.features & (uint64_t)connect.features);
+		*supported = (*supported) * ((uint64_t)connect.features);
 
-		r = tcp_write((char*)&reply, sizeof(reply), accept_sd);
+		printf("send reply\n");
+		r = tcp_write((char*)&reply, sizeof(reply), pipe);
 		if (r < 0) {
 			ret = -r;
 			printf("write reply error\n");
@@ -510,7 +654,7 @@ int accept(int accept_sd, PipeConnectionRef connection_state)
 		if (reply.authorizer_len) {
 			printf("authorizer len, crazy , i do not need authorizer\n");
 			assert(0);
-			r = tcp_write(authorizer_reply.c_str(), authorizer_reply.length(), accept_sd);
+			r = tcp_write(authorizer_reply.c_str(), authorizer_reply.length(), pipe);
 			if (r < 0) {
 				ret = -r;
 				printf("write authorizer error\n");
@@ -518,6 +662,7 @@ int accept(int accept_sd, PipeConnectionRef connection_state)
 			}
 		}
 
+		break;
 #if 0
 		if (reply_tag == CEPH_MSGR_TAG_SEQ) {
 			if (tcp_write((char*)&existing_seq, sizeof(existing_seq)) < 0, accept_sd) {
@@ -530,8 +675,6 @@ int accept(int accept_sd, PipeConnectionRef connection_state)
 			}
 		}
 #endif
-
-		return 0;
 	}
 
 	return 0;
@@ -541,71 +684,88 @@ err_ret:
 
 void *__reader(void *_arg)
 {
-	int accept_sd, rc;
-	uint64_t in_seq = 0, out_seq = 0; //todo 是否会溢出
+	int ret, accept_sd;
+       	//todo 是否会溢出
+	uint64_t in_seq, out_seq;
 	utime_t keepalive_ack_stamp;
 	struct ceph_timespec t;
 	char tag = -1;
 	ceph_le64 seq;
-	PipeConnectionRef connection_state;
+	pipe_t pipe;
+
+	in_seq = 0;
+	out_seq = 0;
+
+	uint64_t supported =
+		CEPH_FEATURE_UID |
+		CEPH_FEATURE_NOSRCADDR |
+		DEPRECATED_CEPH_FEATURE_MONCLOCKCHECK |
+		CEPH_FEATURE_PGID64 |
+		CEPH_FEATURE_MSG_AUTH;
 
 	accept_sd = *((int *)_arg);
 
-	ret = accept(accept_sd, connection_state);
+	pipe.recv_len = 0;
+	pipe.recv_ofs = 0;
+	pipe.accept_sd = accept_sd;
+	printf("begin reader \n");
+	
+	ret = accept(&pipe, &supported);
 	if (ret) {
 		printf("accept error %d \n", ret);
 		goto err_ret;
 	}
 
+	printf("begin reader ok\n");
 	while (1) {
 		printf("reader reading tag...\n");
-		if (tcp_read((char*)&tag, 1, accept_sd) < 0) {
+		if (tcp_read((char*)&tag, 1, &pipe) < 0) {
 			printf("reader couldn't read tag, \n");
 			goto err_ret;
 		}
 
 		if (tag == CEPH_MSGR_TAG_KEEPALIVE) {
 			printf("reader got KEEPALIVE, \n");
-			connection_state->set_last_keepalive(ceph_clock_now(NULL));
+			//connection_state->set_last_keepalive(ceph_clock_now(NULL));
 			continue;
 		}
 
 		if (tag == CEPH_MSGR_TAG_KEEPALIVE2) {
 			printf("reader got KEEPALIVE2 tag ...\n");
 			ceph_timespec t;
-			ret = tcp_read((char*)&t, sizeof(t), accept_sd);
+			ret = tcp_read((char*)&t, sizeof(t), &pipe);
 			if (ret < 0) {
-				printf("reader couldn't read KEEPALIVE2 stamp %s\n", cpp_strerror(errno));
+				printf("reader couldn't read KEEPALIVE2 stamp %d\n", errno);
 				goto err_ret;
 			} else {
 				keepalive_ack_stamp = utime_t(t);
-				connection_state->set_last_keepalive(ceph_clock_now(NULL));
+				//connection_state->set_last_keepalive(ceph_clock_now(NULL));
 				ret = write_keepalive2(CEPH_MSGR_TAG_KEEPALIVE2_ACK, t, accept_sd);
 				if (ret) {
 					printf("write keepalive2 error %d\n", ret);
-					goto ret;
+					goto err_ret;
 				}
 			}
 			continue;
 		}
 
 		if (tag == CEPH_MSGR_TAG_KEEPALIVE2_ACK) {
-			pritnf("reader got KEEPALIVE_ACK\n");
-			ret = tcp_read((char*)&t, sizeof(t), accept_sd);
+			printf("reader got KEEPALIVE_ACK\n");
+			ret = tcp_read((char*)&t, sizeof(t), &pipe);
 			if (ret < 0) {
-				printf("reader couldn't read KEEPALIVE2 stamp %s\n", cpp_strerror(errno));
+				printf("reader couldn't read KEEPALIVE2 stamp %d\n", errno);
 				goto err_ret;
 			} else {
-				connection_state->set_last_keepalive_ack(utime_t(t));
+				//connection_state->set_last_keepalive_ack(utime_t(t));
 			}
 			continue;
 		}
 
 		if (tag == CEPH_MSGR_TAG_ACK) {
 			printf("reader got ACK\n");
-			ret = tcp_read((char*)&seq, sizeof(seq), accept_sd);
+			ret = tcp_read((char*)&seq, sizeof(seq), &pipe);
 			if (ret < 0) {
-				printf("reader couldn't read ack seq, %s\n", cpp_strerror(errno));
+				printf("reader couldn't read ack seq, %d\n", errno);
 				goto err_ret;
 			}
 		       	//else if (state != STATE_CLOSED) {
@@ -615,7 +775,7 @@ void *__reader(void *_arg)
 		} else if (tag == CEPH_MSGR_TAG_MSG) {
 			printf("reader got MSG\n");
       			Message *m = 0;
-      			ret = read_message(&m, connection_state, accept_sd);
+      			ret = read_message(&m, &supported, &pipe);
 			if (!m) {
 				if (ret<0) {
 					goto err_ret;
@@ -632,21 +792,24 @@ void *__reader(void *_arg)
 	  			assert(0 == "skipped incoming seq");
 			}
 
-      			m->set_connection(connection_state.get());
+      			//m->set_connection(connection_state.get());
       			in_seq = m->get_seq();
 			write_ack(in_seq, accept_sd);
 
-      			Message *rsp_m = 0;
-			ret = fetch_msg(m, rsp_m);
-			if (ret) {
-				goto err_ret;
-			}
+			printf("get message type: %d", m->get_type());
+#if 0
+      			//Message *rsp_m = new Message(m->get_type());
+			//ret = fetch_msg(m, NULL);
+			//if (ret) {
+				//goto err_ret;
+			//}
 
 			rsp_m->set_seq(++out_seq);
-			ret = write_msg(rsp_m, accept_sd);
+			ret = write_message(rsp_m, accept_sd);
 			if (ret) {
 				goto err_ret;
 			}
+#endif
 		} else if (tag == CEPH_MSGR_TAG_CLOSE) {
       			printf("reader got CLOSE\n");
 			goto err_ret;
@@ -662,12 +825,12 @@ void *__reader(void *_arg)
 	return NULL;
 err_ret:
         ::shutdown(accept_sd, SHUT_RDWR);
-	return NULL
+	return NULL;
 }
 
 void *__server_start(void *_arg)
 {
-	int ret, socket_fd, listen_port, accept_fd;
+	int ret, socket_fd, listen_port, accept_sd;
 	sockaddr_in server_addr;
 	int *arg;
 	pthread_t th;
@@ -685,10 +848,10 @@ void *__server_start(void *_arg)
 		goto err_ret;
 	}
 
-	ret = ::bind(socket_fd, &server_addr, sizeof(server_addr));
+	ret = ::bind(socket_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
 	if (ret < 0) {
-		dout(0) << "bind socket error" << dendl;
 		ret = -errno;
+		printf("bind socket error, ret, %d\n", ret);
 		goto err_ret;
 	}
 
@@ -699,6 +862,7 @@ void *__server_start(void *_arg)
 		goto err_ret;
 	}
 
+	printf("i am ready for : %d\n", listen_port);
 	while (1) {
 		entity_addr_t addr;
 		socklen_t slen = sizeof(addr.ss_addr());
@@ -709,7 +873,7 @@ void *__server_start(void *_arg)
 			goto err_ret;
 		}
 
-		arg = malloc(sizeof(*arg));
+		arg = (int *)malloc(sizeof(*arg));
 		*arg = accept_sd;
 		ret = pthread_create(&th, NULL, __reader, (void *)arg);
 		if (ret) {
@@ -718,10 +882,10 @@ void *__server_start(void *_arg)
 		}
 	}
 
-	return 0;
+	//return 0;
 	return NULL;
 err_ret:
-	return ret;
+	//return ret;
 	return NULL;
 }
 
@@ -731,7 +895,7 @@ int server_start(int listen_port)
 	int *arg;
 	pthread_t th;
 
-	arg = malloc(sizeof(*arg));
+	arg = (int *)malloc(sizeof(*arg));
 	*arg = listen_port;
 
 	ret = pthread_create(&th, NULL, __server_start, (void *)arg);
@@ -749,15 +913,17 @@ int main(int argc, const char **argv)
 {
 	int ret;
 
-	ret = server_start(6790);
+	ret = server_start(6789);
 	if (ret) {
 		goto err_ret;
 	}
 
-	ret = server_start(6791);
+	/*
+	ret = server_start(6790);
 	if (ret) {
 		goto err_ret;
 	}
+	*/
 
 	pthread_exit(NULL);
 
