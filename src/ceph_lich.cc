@@ -34,7 +34,7 @@ using namespace std;
 #include "mon/MonMap.h"
 #include "mon/Monitor.h"
 #include "mon/MonitorDBStore.h"
-#include "mon/MonClient.h"
+#include "messages/MAuthReply.h"
 
 #include "msg/Messenger.h"
 #include "include/CompatSet.h"
@@ -54,22 +54,47 @@ using namespace std;
 #include "auth/AuthSessionHandler.h"
 
 #define dout_subsys ceph_subsys_mon
+static const int SM_IOV_MAX = (IOV_MAX >= 1024 ? IOV_MAX / 4 : IOV_MAX);
 
 typedef struct {
+	int listen_port;
 	int accept_sd;
     	size_t recv_ofs;
     	size_t recv_len;
 	int ms_tcp_read_timeout = 900;//秒
 	int timeout = 900000;//毫秒
+	uint64_t supported;
+	uint64_t required;
+	uint64_t features;
+	entity_addr_t peer_addr;
+	int crcflags = 0;
 } pipe_t;
 
-#if 0
-Message *fetch_msg(Message *m, Message *rsp_m)
+int fetch_msg(Message *m, Message **rsp_m)
 {
-	printf("msg\n");
-	return m;
+	int ret = 0;
+	Message *reply;
+  	bufferlist response_bl;
+
+	printf("fetch msg\n");
+	switch (m->get_type()) {
+    		case MSG_MON_GLOBAL_ID:
+			printf("mon global id\n");
+			break;
+    		case CEPH_MSG_AUTH:
+			printf("exec msg auth\n");
+  			reply = new MAuthReply(CEPH_AUTH_NONE, &response_bl, 0, 1);
+  			*rsp_m = reply;
+			break;
+    		default:
+			printf("fetch msg unknow, come on...\n");
+			break;
+	}
+
+	return 0;
+err_ret:
+	return ret;
 }
-#endif
 
 int tcp_read_wait(pipe_t *pipe)
 {
@@ -333,7 +358,7 @@ err_ret:
 	return ret;
 }
 
-int read_message(Message **pm, uint64_t *supported, pipe_t *pipe)
+int read_message(Message **pm, pipe_t *pipe)
 {
 	int ret = -1;
 	ceph_msg_header header; 
@@ -351,7 +376,7 @@ int read_message(Message **pm, uint64_t *supported, pipe_t *pipe)
     	ceph_msg_header_old oldheader;
 
 	header_crc = 0;
-	if (*supported & CEPH_FEATURE_NOSRCADDR) {
+	if (pipe->features & CEPH_FEATURE_NOSRCADDR) {
 		if (tcp_read((char*)&header, sizeof(header), pipe) < 0) {
 			ret = -1;
 			printf("read header error\n");;
@@ -447,13 +472,15 @@ int read_message(Message **pm, uint64_t *supported, pipe_t *pipe)
 	}
 
 	// footer
-	if (*supported & CEPH_FEATURE_MSG_AUTH) {
+	if (pipe->supported & CEPH_FEATURE_MSG_AUTH) {
+		printf("read new footer\n");
 		if (tcp_read((char*)&footer, sizeof(footer), pipe) < 0) {
 			ret = -1;
 			printf("read footer error\n");
 			goto err_ret;
 		}
 	} else {
+		printf("read old footer\n");
 		ceph_msg_footer_old old_footer;
 		if (tcp_read((char*)&old_footer, sizeof(old_footer), pipe) < 0) {
 			ret = -1;
@@ -497,17 +524,145 @@ err_ret:
 	return ret;
 }
 
-#if 0
-int write_message(const ceph_msg_header& h, const ceph_msg_footer& f, bufferlist& body)
-{
-	return 0;
-}
-#endif
-
 //return -1, if error
-int write_message(Message **pm, int accept_sd)
+int __write_message(const ceph_msg_header& header, const ceph_msg_footer& footer, bufferlist& blist, pipe_t *pipe)
 {
+	int ret;
+
+	// set up msghdr and iovecs
+	struct msghdr msg;
+	struct iovec msgvec[SM_IOV_MAX];
+	memset(&msg, 0, sizeof(msg));
+	msg.msg_iov = msgvec;
+	int msglen = 0;
+
+	// send tag
+	char tag = CEPH_MSGR_TAG_MSG;
+	msgvec[msg.msg_iovlen].iov_base = &tag;
+	msgvec[msg.msg_iovlen].iov_len = 1;
+	msglen++;
+	msg.msg_iovlen++;
+
+	// send envelope
+	ceph_msg_header_old oldheader;
+	if (pipe->features & CEPH_FEATURE_NOSRCADDR) {
+		msgvec[msg.msg_iovlen].iov_base = (char*)&header;
+		msgvec[msg.msg_iovlen].iov_len = sizeof(header);
+		msglen += sizeof(header);
+		msg.msg_iovlen++;
+	} else {
+		memcpy(&oldheader, &header, sizeof(header));
+		oldheader.src.name = header.src;
+		oldheader.src.addr = pipe->peer_addr;
+		oldheader.orig_src = oldheader.src;
+		oldheader.reserved = header.reserved;
+		oldheader.crc = 0;
+		msgvec[msg.msg_iovlen].iov_base = (char*)&oldheader;
+		msgvec[msg.msg_iovlen].iov_len = sizeof(oldheader);
+		msglen += sizeof(oldheader);
+		msg.msg_iovlen++;
+	}
+
+	// payload (front+data)
+	list<bufferptr>::const_iterator pb = blist.buffers().begin();
+	unsigned b_off = 0;  // carry-over buffer offset, if any
+	unsigned bl_pos = 0; // blist pos
+	unsigned left = blist.length();
+
+	while (left > 0) {
+		unsigned donow = MIN(left, pb->length()-b_off);
+		if (donow == 0) {
+			//ldout(msgr->cct,0) << "donow = " << donow << " left " << left << " pb->length " << pb->length()
+				//<< " b_off " << b_off << dendl;
+		}
+		assert(donow > 0);
+		/*
+		ldout(msgr->cct,30) << " bl_pos " << bl_pos << " b_off " << b_off
+			<< " leftinchunk " << left
+			<< " buffer len " << pb->length()
+			<< " writing " << donow 
+			<< dendl;
+			*/
+
+		if (msg.msg_iovlen >= SM_IOV_MAX-2) {
+			if (do_sendmsg(&msg, msglen, true, pipe->accept_sd))
+				goto fail;
+
+			// and restart the iov
+			msg.msg_iov = msgvec;
+			msg.msg_iovlen = 0;
+			msglen = 0;
+		}
+
+		msgvec[msg.msg_iovlen].iov_base = (void*)(pb->c_str()+b_off);
+		msgvec[msg.msg_iovlen].iov_len = donow;
+		msglen += donow;
+		msg.msg_iovlen++;
+
+		assert(left >= donow);
+		left -= donow;
+		b_off += donow;
+		bl_pos += donow;
+		if (left == 0)
+			break;
+		while (b_off == pb->length()) {
+			++pb;
+			b_off = 0;
+		}
+	}
+	assert(left == 0);
+
+	// send footer; if receiver doesn't support signatures, use the old footer format
+	ceph_msg_footer_old old_footer;
+	if (pipe->features & CEPH_FEATURE_MSG_AUTH) {
+		msgvec[msg.msg_iovlen].iov_base = (void*)&footer;
+		msgvec[msg.msg_iovlen].iov_len = sizeof(footer);
+		msglen += sizeof(footer);
+		msg.msg_iovlen++;
+	} else {
+		old_footer.front_crc = old_footer.middle_crc = 0;
+		old_footer.data_crc = 0;
+		old_footer.flags = footer.flags;   
+		msgvec[msg.msg_iovlen].iov_base = (char*)&old_footer;
+		msgvec[msg.msg_iovlen].iov_len = sizeof(old_footer);
+		msglen += sizeof(old_footer);
+		msg.msg_iovlen++;
+	}
+
+	// send
+	if (do_sendmsg(&msg, msglen, false, pipe->accept_sd))
+		goto fail;
+
+	ret = 0;
+
+out:
+	return ret;
+
+fail:
+	ret = -1;
+	goto out;
+}
+
+int write_message(Message *m, pipe_t *pipe)
+{
+	int ret;
+
+	const ceph_msg_header& header = m->get_header();
+	const ceph_msg_footer& footer = m->get_footer();
+
+	bufferlist blist = m->get_payload();
+	blist.append(m->get_middle());
+	blist.append(m->get_data());
+
+	int rc = __write_message(header, footer, blist, pipe);
+	if (rc < 0) {
+		ret = 1;
+		goto err_ret;
+	}
+
 	return 0;
+err_ret:
+	return ret;
 }
 
 int set_socket_options(int sd)
@@ -516,7 +671,7 @@ int set_socket_options(int sd)
 	return 0;
 }
 
-int accept(pipe_t *pipe, uint64_t *supported)
+int accept(pipe_t *pipe)
 {
 	int ret;
 	// vars
@@ -607,13 +762,17 @@ int accept(pipe_t *pipe, uint64_t *supported)
 		bufferptr tp(sizeof(peer_addr));
 		addrbl.push_back(std::move(tp));
 	}
-
 	printf("read peer addr\n");
 	if (tcp_read(addrbl.c_str(), addrbl.length(), pipe) < 0) {
 		ret = 1;
 		printf("accept couldn't read peer_addr, %d\n", ret);
 		goto err_ret;
 	}
+	{
+		bufferlist::iterator ti = addrbl.begin();
+		::decode(peer_addr, ti);
+	}
+	pipe->peer_addr = peer_addr;
 
 	while (1) {
 		printf("read connect\n");
@@ -623,6 +782,7 @@ int accept(pipe_t *pipe, uint64_t *supported)
 			goto err_ret;
 		}
 
+		printf("read connect, type: %d\n", (int)connect.host_type );
     		connect.features = ceph_sanitize_features(connect.features);
 		authorizer.clear();
 		if (connect.authorizer_len) {
@@ -639,7 +799,7 @@ int accept(pipe_t *pipe, uint64_t *supported)
 
 		//cluster_protocol(0),
 		memset(&reply, 0, sizeof(reply));
-		reply.protocol_version = 15;
+		reply.protocol_version = 15; //和 host_type 相关
 		if (connect.protocol_version != reply.protocol_version) {
 			reply.tag = CEPH_MSGR_TAG_BADPROTOVER;
 			printf("CEPH_MSGR_TAG_BADPROTOVER, connect: %d,  reply: %d\n", connect.protocol_version, reply.protocol_version);
@@ -656,12 +816,13 @@ int accept(pipe_t *pipe, uint64_t *supported)
 		//state = STATE_OPEN;
 
 		reply.tag = (reply_tag ? reply_tag : CEPH_MSGR_TAG_READY);
-		reply.features = (*supported) * ((uint64_t)connect.features);
+		reply.features = (pipe->supported) & ((uint64_t)connect.features);
 		reply.global_seq = ++global_seq;
 		reply.connect_seq = connect_seq;
 		reply.flags = 0;
 		reply.authorizer_len = authorizer_reply.length();
 
+		pipe->features = reply.features & (uint64_t)connect.features;
 		printf("send reply\n");
 		r = tcp_write((char*)&reply, sizeof(reply), pipe);
 		if (r < 0) {
@@ -712,24 +873,15 @@ void *__reader(void *_arg)
 	ceph_le64 seq;
 	pipe_t pipe;
 
+	pipe = *((pipe_t *)_arg);
+
 	in_seq = 0;
 	out_seq = 0;
 
-	uint64_t supported =
-		CEPH_FEATURE_UID |
-		CEPH_FEATURE_NOSRCADDR |
-		DEPRECATED_CEPH_FEATURE_MONCLOCKCHECK |
-		CEPH_FEATURE_PGID64 |
-		CEPH_FEATURE_MSG_AUTH;
-
-	accept_sd = *((int *)_arg);
-
-	pipe.recv_len = 0;
-	pipe.recv_ofs = 0;
-	pipe.accept_sd = accept_sd;
+	accept_sd = pipe.accept_sd;
 	printf("begin reader \n");
 	
-	ret = accept(&pipe, &supported);
+	ret = accept(&pipe);
 	if (ret) {
 		printf("accept error %d \n", ret);
 		goto err_ret;
@@ -794,7 +946,7 @@ void *__reader(void *_arg)
 		} else if (tag == CEPH_MSGR_TAG_MSG) {
 			printf("reader got MSG\n");
       			Message *m = 0;
-      			ret = read_message(&m, &supported, &pipe);
+      			ret = read_message(&m, &pipe);
 			if (!m) {
 				if (ret<0) {
 					goto err_ret;
@@ -816,19 +968,20 @@ void *__reader(void *_arg)
 			write_ack(in_seq, accept_sd);
 
 			printf("get message type: %d", m->get_type());
-#if 0
-      			//Message *rsp_m = new Message(m->get_type());
-			//ret = fetch_msg(m, NULL);
-			//if (ret) {
-				//goto err_ret;
-			//}
-
-			rsp_m->set_seq(++out_seq);
-			ret = write_message(rsp_m, accept_sd);
+      			Message *rsp_m = 0;
+			//= new Message(m->get_type());
+			ret = fetch_msg(m, &rsp_m);
 			if (ret) {
+				printf("fetch msg error\n");
 				goto err_ret;
 			}
-#endif
+
+			rsp_m->set_seq(++out_seq);
+			ret = write_message(rsp_m, &pipe);
+			if (ret) {
+				printf("write message error\n");
+				goto err_ret;
+			}
 		} else if (tag == CEPH_MSGR_TAG_CLOSE) {
       			printf("reader got CLOSE\n");
 			goto err_ret;
@@ -853,8 +1006,12 @@ void *__server_start(void *_arg)
 	sockaddr_in server_addr;
 	int *arg;
 	pthread_t th;
+	pipe_t *pipe;
+	pipe_t *pipe2;
 
-	listen_port = *((int *)_arg);
+	pipe = (pipe_t *)_arg;
+
+	listen_port = pipe->listen_port;
 
 	memset(&server_addr, 0, sizeof(server_addr));  
 	server_addr.sin_family = AF_INET;  
@@ -892,9 +1049,11 @@ void *__server_start(void *_arg)
 			goto err_ret;
 		}
 
-		arg = (int *)malloc(sizeof(*arg));
-		*arg = accept_sd;
-		ret = pthread_create(&th, NULL, __reader, (void *)arg);
+		pipe2 = (pipe_t *)malloc(sizeof(*arg));
+		memcpy(pipe2, pipe, sizeof(pipe_t));
+		pipe2->accept_sd = accept_sd;
+
+		ret = pthread_create(&th, NULL, __reader, (void *)pipe2);
 		if (ret) {
 			dout(0) << "thread create error, ret " << ret << dendl;
 			goto err_ret;
@@ -905,21 +1064,50 @@ void *__server_start(void *_arg)
 	return NULL;
 err_ret:
 	//return ret;
+	free(_arg);
 	return NULL;
 }
 
-int server_start(int listen_port)
+int server_start(pipe_t *pipe)
 {
 	int ret;
 	int *arg;
 	pthread_t th;
 
-	arg = (int *)malloc(sizeof(*arg));
-	*arg = listen_port;
-
-	ret = pthread_create(&th, NULL, __server_start, (void *)arg);
+	ret = pthread_create(&th, NULL, __server_start, (void *)pipe);
 	if (ret) {
 		dout(0) << "thread create error, ret " << ret << dendl;
+		goto err_ret;
+	}
+
+	return 0;
+err_ret:
+	free(pipe);
+	return ret;
+}
+
+int mon_start()
+{
+	int ret;
+	pipe_t *pipe;
+
+	pipe = (pipe_t *)malloc(sizeof(pipe_t));
+
+	uint64_t supported =
+		CEPH_FEATURE_UID |
+		CEPH_FEATURE_NOSRCADDR |
+		DEPRECATED_CEPH_FEATURE_MONCLOCKCHECK |
+		CEPH_FEATURE_PGID64 |
+		CEPH_FEATURE_MSG_AUTH;
+
+	pipe->recv_len = 0;
+	pipe->recv_ofs = 0;
+	pipe->supported = supported | CEPH_FEATURES_SUPPORTED_DEFAULT;
+	pipe->required = 0;
+	pipe->listen_port = 6789;
+
+	ret = server_start(pipe);
+	if (ret) {
 		goto err_ret;
 	}
 
@@ -928,21 +1116,19 @@ err_ret:
 	return ret;
 }
 
+int osd_start()
+{
+	return 0;
+}
+
 int main(int argc, const char **argv) 
 {
 	int ret;
 
-	ret = server_start(6789);
+	ret = mon_start();
 	if (ret) {
 		goto err_ret;
 	}
-
-	/*
-	ret = server_start(6790);
-	if (ret) {
-		goto err_ret;
-	}
-	*/
 
 	pthread_exit(NULL);
 
