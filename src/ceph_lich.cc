@@ -63,6 +63,7 @@ typedef struct {
 	int mon_subscribe_interval;
 	MonMap *monmap;
 	OSDMap *osdmap;
+	MonitorDBStore *store;
 } config_t;
 
 typedef struct {
@@ -74,6 +75,8 @@ typedef struct {
 	int accept_sd;
     	size_t recv_ofs;
     	size_t recv_len;
+	uint64_t in_seq;
+	uint64_t out_seq;
 	int ms_tcp_read_timeout = 900;//秒
 	int timeout = 900000;//毫秒
 	uint64_t supported;
@@ -130,6 +133,7 @@ int obtain_monmap(MonitorDBStore &store, bufferlist &bl)
   derr << __func__ << " unable to find a monmap" << dendl;
   return -ENOENT;
 }
+
 int tcp_read_wait(pipe_t *pipe)
 {
 	struct pollfd pfd;
@@ -695,6 +699,7 @@ int write_message(Message *m, pipe_t *pipe)
 {
 	int ret;
 
+	m->set_seq(++pipe->out_seq);
 	m->encode(pipe->features, pipe->crcflags);
 
 	const ceph_msg_header& header = m->get_header();
@@ -718,10 +723,22 @@ err_ret:
 int send_latest_osdmap(pipe_t *pipe)
 {
 	int ret;
+	epoch_t  epoch;
 
-	//bufferlist bl;
-	//m_config.osdmap->encode(bl, pipe->features);
-	ret = write_message(new MOSDMap(m_config.monmap->fsid), pipe);
+	epoch = m_config.osdmap->get_epoch();
+	MOSDMap *r = new MOSDMap(m_config.monmap->fsid);
+
+	//get_version_full(epoch, r->maps[osdmap.get_epoch()]);
+
+	//string key = pipe->store->combine_strings("full", epoch);
+	//pipe->store->get("osdmap", key, r->maps[epoch])
+
+	m_config.osdmap->encode(r->maps[epoch], pipe->features);
+	r->oldest_map = 1;
+	r->newest_map = epoch;
+
+	printf("epoch: %d\n", (int)epoch);
+	ret = write_message(r, pipe);
 	if (ret) {
 		printf("send lastest osdmap error : %d\n", ret);
 		goto err_ret;
@@ -996,7 +1013,7 @@ void *__reader(void *_arg)
 {
 	int ret, accept_sd;
        	//todo 是否会溢出
-	uint64_t in_seq, out_seq;
+	uint64_t in_seq;
 	utime_t keepalive_ack_stamp;
 	struct ceph_timespec t;
 	char tag = -1;
@@ -1006,7 +1023,6 @@ void *__reader(void *_arg)
 	memcpy(&pipe, (pipe_t *)_arg, sizeof(pipe_t));
 
 	in_seq = 0;
-	out_seq = 0;
 
 	accept_sd = pipe.accept_sd;
 	printf("begin reader \n");
@@ -1085,17 +1101,17 @@ void *__reader(void *_arg)
 			}
 
 			//todo 处理seq
-      			if (m->get_seq() <= in_seq) {
+      			if (m->get_seq() <= pipe.in_seq) {
 				printf("reader old msg\n");
 				continue;
 			}
-      			if (m->get_seq() > in_seq + 1) {
+      			if (m->get_seq() > pipe.in_seq + 1) {
 	  			assert(0 == "skipped incoming seq");
 			}
 
       			//m->set_connection(connection_state.get());
-      			in_seq = m->get_seq();
-			write_ack(in_seq, accept_sd);
+      			pipe.in_seq = m->get_seq();
+			write_ack(pipe.in_seq, accept_sd);
 
 			printf("get message type: %d\n", m->get_type());
       			Message *rsp_m = 0;
@@ -1106,7 +1122,6 @@ void *__reader(void *_arg)
 				goto err_ret;
 			}
 
-			rsp_m->set_seq(++out_seq);
 			ret = write_message(rsp_m, &pipe);
 			if (ret) {
 				printf("write message error\n");
@@ -1234,6 +1249,8 @@ int mon_start()
 
 	pipe->recv_len = 0;
 	pipe->recv_ofs = 0;
+	pipe->out_seq = 0;
+	pipe->in_seq = 0;
 	pipe->supported = supported | CEPH_FEATURES_SUPPORTED_DEFAULT;
 	pipe->required = 0;
 	pipe->listen_port = 6789;
@@ -1269,10 +1286,13 @@ int main(int argc, const char **argv)
   	OSDMap osdmap;
   	bufferlist monmapbl;
   	bufferlist osdmapbl;
-#if 0
-	MonitorDBStore *store = new MonitorDBStore("/root/ceph/src/dev/mon.a");
+
+	string path = "/root/ceph/src/dev/mon.a";
+	MonitorDBStore *store = new MonitorDBStore(path);
+	m_config.store = store;
+
+	/*
 	bufferlist mapbl;
-	MonMap monmap;
 	int err = obtain_monmap(*store, mapbl);
 	if (err >= 0) {
 		try {
@@ -1284,7 +1304,8 @@ int main(int argc, const char **argv)
 		derr << "unable to obtain a monmap: " << cpp_strerror(err) << dendl;
 	}
 	m_config.monmap = &monmap;
-#endif
+	*/
+
 	ret = monmapbl.read_file("./monmap", &error);
 	if (ret) {
 		printf("read monmap file error\n");
@@ -1317,6 +1338,7 @@ int main(int argc, const char **argv)
 		}
 	}
 	m_config.osdmap = &osdmap;
+  	printf("fuck build latest osdmap, get_epoch(): %d\n", (int)osdmap.get_epoch());
 
 	ret = mon_start();
 	if (ret) {
