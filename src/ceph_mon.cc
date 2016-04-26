@@ -516,6 +516,7 @@ int main(int argc, const char **argv)
       prefork.exit(1);
   }
 
+  dout(-1) << "path " << g_conf->mon_data << dendl;
   MonitorDBStore *store = new MonitorDBStore(g_conf->mon_data);
   err = store->open(std::cerr);
   if (err < 0) {
@@ -612,6 +613,7 @@ int main(int argc, const char **argv)
     }
   }
 
+  dout(-1) << " i get a monmap " << dendl;
   // this is what i will bind to
   entity_addr_t ipaddr;
 

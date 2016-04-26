@@ -361,161 +361,179 @@ uint64_t AuthMonitor::assign_global_id(MonOpRequestRef op, bool should_increase_
 
 bool AuthMonitor::prep_auth(MonOpRequestRef op, bool paxos_writable)
 {
-  MAuth *m = static_cast<MAuth*>(op->get_req());
-  dout(10) << "prep_auth() blob_size=" << m->get_auth_payload().length() << dendl;
+	MAuth *m = static_cast<MAuth*>(op->get_req());
+	dout(10) << "zz2 prep_auth() blob_size=" << m->get_auth_payload().length() << dendl;
 
-  MonSession *s = op->get_session();
-  if (!s) {
-    dout(10) << "no session, dropping" << dendl;
-    return true;
-  }
-
-  int ret = 0;
-  AuthCapsInfo caps_info;
-  MAuthReply *reply;
-  bufferlist response_bl;
-  bufferlist::iterator indata = m->auth_payload.begin();
-  __u32 proto = m->protocol;
-  bool start = false;
-  EntityName entity_name;
-
-  // set up handler?
-  if (m->protocol == 0 && !s->auth_handler) {
-    set<__u32> supported;
-
-    try {
-      __u8 struct_v = 1;
-      ::decode(struct_v, indata);
-      ::decode(supported, indata);
-      ::decode(entity_name, indata);
-      ::decode(s->global_id, indata);
-    } catch (const buffer::error &e) {
-      dout(10) << "failed to decode initial auth message" << dendl;
-      ret = -EINVAL;
-      goto reply;
-    }
-
-    // do we require cephx signatures?
-
-    if (!m->get_connection()->has_feature(CEPH_FEATURE_MSG_AUTH)) {
-      if (entity_name.get_type() == CEPH_ENTITY_TYPE_MON ||
-	  entity_name.get_type() == CEPH_ENTITY_TYPE_OSD ||
-	  entity_name.get_type() == CEPH_ENTITY_TYPE_MDS) {
-	if (g_conf->cephx_cluster_require_signatures ||
-	    g_conf->cephx_require_signatures) {
-	  dout(1) << m->get_source_inst()
-                  << " supports cephx but not signatures and"
-                  << " 'cephx [cluster] require signatures = true';"
-                  << " disallowing cephx" << dendl;
-	  supported.erase(CEPH_AUTH_CEPHX);
+	MonSession *s = op->get_session();
+	if (!s) {
+		dout(10) << "no session, dropping" << dendl;
+		return true;
 	}
-      } else {
-	if (g_conf->cephx_service_require_signatures ||
-	    g_conf->cephx_require_signatures) {
-	  dout(1) << m->get_source_inst()
-                  << " supports cephx but not signatures and"
-                  << " 'cephx [service] require signatures = true';"
-                  << " disallowing cephx" << dendl;
-	  supported.erase(CEPH_AUTH_CEPHX);
+
+	int ret = 0;
+	AuthCapsInfo caps_info;
+	MAuthReply *reply;
+	bufferlist response_bl;
+	bufferlist::iterator indata = m->auth_payload.begin();
+	__u32 proto = m->protocol;
+	bool start = false;
+	EntityName entity_name;
+	// set up handler?
+	if (m->protocol == 0 && !s->auth_handler) {
+		set<__u32> supported;
+
+		dout(10) << "m->protocol " <<  m->protocol << dendl;
+		try {
+			__u8 struct_v = 1;
+			::decode(struct_v, indata);
+			::decode(supported, indata);
+			::decode(entity_name, indata);
+			::decode(s->global_id, indata);
+		} catch (const buffer::error &e) {
+			dout(10) << "failed to decode initial auth message" << dendl;
+			ret = -EINVAL;
+			goto reply;
+		}
+
+		// do we require cephx signatures?
+
+		dout(10) << "has_feature: " << m->get_connection()->has_feature(CEPH_FEATURE_MSG_AUTH) << dendl;
+		if (!m->get_connection()->has_feature(CEPH_FEATURE_MSG_AUTH)) {
+			if (entity_name.get_type() == CEPH_ENTITY_TYPE_MON ||
+					entity_name.get_type() == CEPH_ENTITY_TYPE_OSD ||
+					entity_name.get_type() == CEPH_ENTITY_TYPE_MDS) {
+				if (g_conf->cephx_cluster_require_signatures ||
+						g_conf->cephx_require_signatures) {
+					dout(10) << m->get_source_inst()
+						<< " supports cephx but not signatures and"
+						<< " 'cephx [cluster] require signatures = true';"
+						<< " disallowing cephx" << dendl;
+					supported.erase(CEPH_AUTH_CEPHX);
+				}
+			} else {
+				if (g_conf->cephx_service_require_signatures ||
+						g_conf->cephx_require_signatures) {
+					dout(10) << m->get_source_inst()
+						<< " supports cephx but not signatures and"
+						<< " 'cephx [service] require signatures = true';"
+						<< " disallowing cephx" << dendl;
+					supported.erase(CEPH_AUTH_CEPHX);
+				}
+			}
+		}
+
+		int type;
+		if (entity_name.get_type() == CEPH_ENTITY_TYPE_MON ||
+				entity_name.get_type() == CEPH_ENTITY_TYPE_OSD ||
+				entity_name.get_type() == CEPH_ENTITY_TYPE_MDS) {
+			dout(10) << "no client" <<  dendl;
+			type = mon->auth_cluster_required.pick(supported);
+		}
+		else {
+			dout(10) << "client" <<  dendl;
+			type = mon->auth_service_required.pick(supported);
+		}
+
+		dout(10) << "auth type" <<  type << dendl;
+
+		s->auth_handler = get_auth_service_handler(type, g_ceph_context, &mon->key_server);
+		if (!s->auth_handler) {
+			dout(10) << "client did not provide supported auth type" << dendl;
+			ret = -ENOTSUP;
+			goto reply;
+		}
+		start = true;
+	} else if (!s->auth_handler) {
+		dout(10) << "protocol specified but no s->auth_handler" << dendl;
+		ret = -EINVAL;
+		goto reply;
 	}
-      }
-    }
 
-    int type;
-    if (entity_name.get_type() == CEPH_ENTITY_TYPE_MON ||
-	entity_name.get_type() == CEPH_ENTITY_TYPE_OSD ||
-	entity_name.get_type() == CEPH_ENTITY_TYPE_MDS)
-      type = mon->auth_cluster_required.pick(supported);
-    else
-      type = mon->auth_service_required.pick(supported);
+	/* assign a new global_id? we assume this should only happen on the first
+	   request. If a client tries to send it later, it'll screw up its auth
+	   session */
+	if (!s->global_id) {
+		s->global_id = assign_global_id(op, paxos_writable);
+		if (!s->global_id) {
 
-    s->auth_handler = get_auth_service_handler(type, g_ceph_context, &mon->key_server);
-    if (!s->auth_handler) {
-      dout(1) << "client did not provide supported auth type" << dendl;
-      ret = -ENOTSUP;
-      goto reply;
-    }
-    start = true;
-  } else if (!s->auth_handler) {
-      dout(10) << "protocol specified but no s->auth_handler" << dendl;
-      ret = -EINVAL;
-      goto reply;
-  }
+			dout(10) << "no global id" << dendl;
+			delete s->auth_handler;
+			s->auth_handler = NULL;
 
-  /* assign a new global_id? we assume this should only happen on the first
-     request. If a client tries to send it later, it'll screw up its auth
-     session */
-  if (!s->global_id) {
-    s->global_id = assign_global_id(op, paxos_writable);
-    if (!s->global_id) {
+			if (mon->is_leader() && paxos_writable) {
+				dout(10) << "increasing global id, waitlisting message" << dendl;
+				wait_for_active(op, new C_RetryMessage(this, op));
+				goto done;
+			}
 
-      delete s->auth_handler;
-      s->auth_handler = NULL;
+			if (!mon->is_leader()) {
+				dout(10) << "not the leader, requesting more ids from leader" << dendl;
+				int leader = mon->get_leader();
+				MMonGlobalID *req = new MMonGlobalID();
+				req->old_max_id = max_global_id;
+				mon->messenger->send_message(req, mon->monmap->get_inst(leader));
+				wait_for_finished_proposal(op, new C_RetryMessage(this, op));
+				return true;
+			}
 
-      if (mon->is_leader() && paxos_writable) {
-        dout(10) << "increasing global id, waitlisting message" << dendl;
-        wait_for_active(op, new C_RetryMessage(this, op));
-        goto done;
-      }
+			assert(!paxos_writable);
+			return false;
+		}
+	}
 
-      if (!mon->is_leader()) {
-	dout(10) << "not the leader, requesting more ids from leader" << dendl;
-	int leader = mon->get_leader();
-	MMonGlobalID *req = new MMonGlobalID();
-	req->old_max_id = max_global_id;
-	mon->messenger->send_message(req, mon->monmap->get_inst(leader));
-	wait_for_finished_proposal(op, new C_RetryMessage(this, op));
-	return true;
-      }
+	try {
+		uint64_t auid = 0;
+		if (start) {
+			// new session
 
-      assert(!paxos_writable);
-      return false;
-    }
-  }
 
-  try {
-    uint64_t auid = 0;
-    if (start) {
-      // new session
+			dout(10) << "new session, m->monmap_epoch: " << m->monmap_epoch <<" mon->monmap_epoch "<< mon->monmap->get_epoch() << dendl;
+			// always send the latest monmap.
+			if (m->monmap_epoch < mon->monmap->get_epoch()) {
+				dout(10) << "send new monmap" << dendl;
+				mon->send_latest_monmap(m->get_connection().get());
+			}
 
-      // always send the latest monmap.
-      if (m->monmap_epoch < mon->monmap->get_epoch())
-	mon->send_latest_monmap(m->get_connection().get());
+			proto = s->auth_handler->start_session(entity_name, indata, response_bl, caps_info);
+			ret = 0;
+			if (caps_info.allow_all)
+				s->caps.set_allow_all();
+		} else {
+			// request
+			dout(10) << "request " << dendl;
+			ret = s->auth_handler->handle_request(indata, response_bl, s->global_id, caps_info, &auid);
+		}
+		if (ret == -EIO) {
+			wait_for_active(op, new C_RetryMessage(this,op));
 
-      proto = s->auth_handler->start_session(entity_name, indata, response_bl, caps_info);
-      ret = 0;
-      if (caps_info.allow_all)
-	s->caps.set_allow_all();
-    } else {
-      // request
-      ret = s->auth_handler->handle_request(indata, response_bl, s->global_id, caps_info, &auid);
-    }
-    if (ret == -EIO) {
-      wait_for_active(op, new C_RetryMessage(this,op));
-      goto done;
-    }
-    if (caps_info.caps.length()) {
-      bufferlist::iterator p = caps_info.caps.begin();
-      string str;
-      try {
-	::decode(str, p);
-      } catch (const buffer::error &err) {
-	derr << "corrupt cap data for " << entity_name << " in auth db" << dendl;
-	str.clear();
-      }
-      s->caps.parse(str, NULL);
-      s->auid = auid;
-    }
-  } catch (const buffer::error &err) {
-    ret = -EINVAL;
-    dout(0) << "caught error when trying to handle auth request, probably malformed request" << dendl;
-  }
+			dout(10) << "eio crazy" <<  dendl;
+			goto done;
+		}
+		if (caps_info.caps.length()) {
+
+			dout(10) << "caps length " << caps_info.caps.length() << dendl;
+			bufferlist::iterator p = caps_info.caps.begin();
+			string str;
+			try {
+				::decode(str, p);
+			} catch (const buffer::error &err) {
+				derr << "corrupt cap data for " << entity_name << " in auth db" << dendl;
+				str.clear();
+			}
+			s->caps.parse(str, NULL);
+			s->auid = auid;
+		}
+	} catch (const buffer::error &err) {
+		ret = -EINVAL;
+		dout(10) << "caught error when trying to handle auth request, probably malformed request" << dendl;
+	}
 
 reply:
-  reply = new MAuthReply(proto, &response_bl, ret, s->global_id);
-  mon->send_reply(op, reply);
+	dout(10) << "reply request proto " << proto << " ret " << ret << "global_id" << s->global_id  << dendl;
+	reply = new MAuthReply(proto, &response_bl, ret, s->global_id);
+	mon->send_reply(op, reply);
 done:
-  return true;
+	return true;
 }
 
 bool AuthMonitor::preprocess_command(MonOpRequestRef op)

@@ -4215,71 +4215,71 @@ void Monitor::handle_timecheck(MonOpRequestRef op)
 
 void Monitor::handle_subscribe(MonOpRequestRef op)
 {
-  MMonSubscribe *m = static_cast<MMonSubscribe*>(op->get_req());
-  dout(10) << "handle_subscribe " << *m << dendl;
-  
-  bool reply = false;
+	MMonSubscribe *m = static_cast<MMonSubscribe*>(op->get_req());
+	dout(10) << "handle_subscribe " << *m << dendl;
 
-  MonSession *s = op->get_session();
-  assert(s);
+	bool reply = false;
 
-  for (map<string,ceph_mon_subscribe_item>::iterator p = m->what.begin();
-       p != m->what.end();
-       ++p) {
-    // if there are any non-onetime subscriptions, we need to reply to start the resubscribe timer
-    if ((p->second.flags & CEPH_SUBSCRIBE_ONETIME) == 0)
-      reply = true;
+	MonSession *s = op->get_session();
+	assert(s);
 
-    // remove conflicting subscribes
-    if (logmon()->sub_name_to_id(p->first) >= 0) {
-      for (map<string, Subscription*>::iterator it = s->sub_map.begin();
-	   it != s->sub_map.end(); ) {
-	if (it->first != p->first && logmon()->sub_name_to_id(it->first) >= 0) {
-	  session_map.remove_sub((it++)->second);
-	} else {
-	  ++it;
+	for (map<string,ceph_mon_subscribe_item>::iterator p = m->what.begin();
+			p != m->what.end();
+			++p) {
+		// if there are any non-onetime subscriptions, we need to reply to start the resubscribe timer
+		if ((p->second.flags & CEPH_SUBSCRIBE_ONETIME) == 0)
+			reply = true;
+
+		// remove conflicting subscribes
+		if (logmon()->sub_name_to_id(p->first) >= 0) {
+			for (map<string, Subscription*>::iterator it = s->sub_map.begin();
+					it != s->sub_map.end(); ) {
+				if (it->first != p->first && logmon()->sub_name_to_id(it->first) >= 0) {
+					session_map.remove_sub((it++)->second);
+				} else {
+					++it;
+				}
+			}
+		}
+
+		session_map.add_update_sub(s, p->first, p->second.start, 
+				p->second.flags & CEPH_SUBSCRIBE_ONETIME,
+				m->get_connection()->has_feature(CEPH_FEATURE_INCSUBOSDMAP));
+
+		if (p->first.find("mdsmap") == 0 || p->first == "fsmap") {
+			dout(10) << __func__ << ": MDS sub '" << p->first << "'" << dendl;
+			if ((int)s->is_capable("mds", MON_CAP_R)) {
+				Subscription *sub = s->sub_map[p->first];
+				assert(sub != nullptr);
+				mdsmon()->check_sub(sub);
+			}
+		} else if (p->first == "osdmap") {
+			if ((int)s->is_capable("osd", MON_CAP_R)) {
+				if (s->osd_epoch > p->second.start) {
+					// client needs earlier osdmaps on purpose, so reset the sent epoch
+					s->osd_epoch = 0;
+				}
+				osdmon()->check_sub(s->sub_map["osdmap"]);
+			}
+		} else if (p->first == "osd_pg_creates") {
+			if ((int)s->is_capable("osd", MON_CAP_W)) {
+				pgmon()->check_sub(s->sub_map["osd_pg_creates"]);
+			}
+		} else if (p->first == "monmap") {
+			check_sub(s->sub_map["monmap"]);
+		} else if (logmon()->sub_name_to_id(p->first) >= 0) {
+			logmon()->check_sub(s->sub_map[p->first]);
+		}
 	}
-      }
-    }
 
-    session_map.add_update_sub(s, p->first, p->second.start, 
-			       p->second.flags & CEPH_SUBSCRIBE_ONETIME,
-			       m->get_connection()->has_feature(CEPH_FEATURE_INCSUBOSDMAP));
-
-    if (p->first.find("mdsmap") == 0 || p->first == "fsmap") {
-      dout(10) << __func__ << ": MDS sub '" << p->first << "'" << dendl;
-      if ((int)s->is_capable("mds", MON_CAP_R)) {
-        Subscription *sub = s->sub_map[p->first];
-        assert(sub != nullptr);
-        mdsmon()->check_sub(sub);
-      }
-    } else if (p->first == "osdmap") {
-      if ((int)s->is_capable("osd", MON_CAP_R)) {
-	if (s->osd_epoch > p->second.start) {
-	  // client needs earlier osdmaps on purpose, so reset the sent epoch
-	  s->osd_epoch = 0;
+	if (reply) {
+		// we only need to reply if the client is old enough to think it
+		// has to send renewals.
+		ConnectionRef con = m->get_connection();
+		if (!con->has_feature(CEPH_FEATURE_MON_STATEFUL_SUB))
+			m->get_connection()->send_message(new MMonSubscribeAck(
+						monmap->get_fsid(), (int)g_conf->mon_subscribe_interval));
 	}
-        osdmon()->check_sub(s->sub_map["osdmap"]);
-      }
-    } else if (p->first == "osd_pg_creates") {
-      if ((int)s->is_capable("osd", MON_CAP_W)) {
-	pgmon()->check_sub(s->sub_map["osd_pg_creates"]);
-      }
-    } else if (p->first == "monmap") {
-      check_sub(s->sub_map["monmap"]);
-    } else if (logmon()->sub_name_to_id(p->first) >= 0) {
-      logmon()->check_sub(s->sub_map[p->first]);
-    }
-  }
-
-  if (reply) {
-    // we only need to reply if the client is old enough to think it
-    // has to send renewals.
-    ConnectionRef con = m->get_connection();
-    if (!con->has_feature(CEPH_FEATURE_MON_STATEFUL_SUB))
-      m->get_connection()->send_message(new MMonSubscribeAck(
-	monmap->get_fsid(), (int)g_conf->mon_subscribe_interval));
-  }
 
 }
 

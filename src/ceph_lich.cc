@@ -35,6 +35,9 @@ using namespace std;
 #include "mon/Monitor.h"
 #include "mon/MonitorDBStore.h"
 #include "messages/MAuthReply.h"
+#include "messages/MMonSubscribeAck.h"
+#include "messages/MMonMap.h"
+#include "messages/MOSDMap.h"
 
 #include "msg/Messenger.h"
 #include "include/CompatSet.h"
@@ -57,6 +60,16 @@ using namespace std;
 static const int SM_IOV_MAX = (IOV_MAX >= 1024 ? IOV_MAX / 4 : IOV_MAX);
 
 typedef struct {
+	int mon_subscribe_interval;
+	MonMap *monmap;
+	OSDMap *osdmap;
+} config_t;
+
+typedef struct {
+	int mon_subscribe_interval;
+} monmap_t;
+
+typedef struct {
 	int listen_port;
 	int accept_sd;
     	size_t recv_ofs;
@@ -70,32 +83,53 @@ typedef struct {
 	int crcflags = 0;
 } pipe_t;
 
-int fetch_msg(Message *m, Message **rsp_m)
+config_t m_config;
+
+int obtain_monmap(MonitorDBStore &store, bufferlist &bl)
 {
-	int ret = 0;
-	Message *reply;
-  	bufferlist response_bl;
+  dout(10) << __func__ << dendl;
+  /*
+   * the monmap may be in one of three places:
+   *  'monmap:<latest_version_no>' - the monmap we'd really like to have
+   *  'mon_sync:latest_monmap'     - last monmap backed up for the last sync
+   *  'mkfs:monmap'                - a monmap resulting from mkfs
+   */
 
-	printf("fetch msg\n");
-	switch (m->get_type()) {
-    		case MSG_MON_GLOBAL_ID:
-			printf("mon global id\n");
-			break;
-    		case CEPH_MSG_AUTH:
-			printf("exec msg auth\n");
-  			reply = new MAuthReply(CEPH_AUTH_NONE, &response_bl, 0, 1);
-  			*rsp_m = reply;
-			break;
-    		default:
-			printf("fetch msg unknow, come on...\n");
-			break;
-	}
+  if (store.exists("monmap", "last_committed")) {
+    version_t latest_ver = store.get("monmap", "last_committed");
+    if (store.exists("monmap", latest_ver)) {
+      int err = store.get("monmap", latest_ver, bl);
+      assert(err == 0);
+      assert(bl.length() > 0);
+      dout(10) << __func__ << " read last committed monmap ver "
+               << latest_ver << dendl;
+      return 0;
+    }
+  }
 
-	return 0;
-err_ret:
-	return ret;
+  if (store.exists("mon_sync", "in_sync")
+      || store.exists("mon_sync", "force_sync")) {
+    dout(10) << __func__ << " detected aborted sync" << dendl;
+    if (store.exists("mon_sync", "latest_monmap")) {
+      int err = store.get("mon_sync", "latest_monmap", bl);
+      assert(err == 0);
+      assert(bl.length() > 0);
+      dout(10) << __func__ << " read backup monmap" << dendl;
+      return 0;
+    }
+  }
+
+  if (store.exists("mkfs", "monmap")) {
+    dout(10) << __func__ << " found mkfs monmap" << dendl;
+    int err = store.get("mkfs", "monmap", bl);
+    assert(err == 0);
+    assert(bl.length() > 0);
+    return 0;
+  }
+
+  derr << __func__ << " unable to find a monmap" << dendl;
+  return -ENOENT;
 }
-
 int tcp_read_wait(pipe_t *pipe)
 {
 	struct pollfd pfd;
@@ -114,7 +148,7 @@ int tcp_read_wait(pipe_t *pipe)
 	}
 
 	if (poll(&pfd, 1, pipe->timeout) <= 0) {
-		printf("pipe timeout\n");
+		printf("pipe timeout, %d\n", pipe->timeout);
 		return -1;
 	}
 
@@ -546,17 +580,24 @@ int __write_message(const ceph_msg_header& header, const ceph_msg_footer& footer
 	// send envelope
 	ceph_msg_header_old oldheader;
 	if (pipe->features & CEPH_FEATURE_NOSRCADDR) {
+		printf("send header features with no src addr\n");
 		msgvec[msg.msg_iovlen].iov_base = (char*)&header;
 		msgvec[msg.msg_iovlen].iov_len = sizeof(header);
 		msglen += sizeof(header);
 		msg.msg_iovlen++;
 	} else {
+		printf("send header crc\n");
 		memcpy(&oldheader, &header, sizeof(header));
 		oldheader.src.name = header.src;
 		oldheader.src.addr = pipe->peer_addr;
 		oldheader.orig_src = oldheader.src;
 		oldheader.reserved = header.reserved;
-		oldheader.crc = 0;
+		if (pipe->crcflags & MSG_CRC_HEADER) {
+			oldheader.crc = ceph_crc32c(0, (unsigned char*)&oldheader,
+				    sizeof(oldheader) - sizeof(oldheader.crc));
+		} else {
+			oldheader.crc = 0;
+		}
 		msgvec[msg.msg_iovlen].iov_base = (char*)&oldheader;
 		msgvec[msg.msg_iovlen].iov_len = sizeof(oldheader);
 		msglen += sizeof(oldheader);
@@ -615,13 +656,20 @@ int __write_message(const ceph_msg_header& header, const ceph_msg_footer& footer
 	// send footer; if receiver doesn't support signatures, use the old footer format
 	ceph_msg_footer_old old_footer;
 	if (pipe->features & CEPH_FEATURE_MSG_AUTH) {
+		printf("wirth footer features with msg_auth\n");
 		msgvec[msg.msg_iovlen].iov_base = (void*)&footer;
 		msgvec[msg.msg_iovlen].iov_len = sizeof(footer);
 		msglen += sizeof(footer);
 		msg.msg_iovlen++;
 	} else {
-		old_footer.front_crc = old_footer.middle_crc = 0;
-		old_footer.data_crc = 0;
+		printf("no features msg_auth\n");
+		if (pipe->crcflags & MSG_CRC_HEADER) {
+      			old_footer.front_crc = footer.front_crc;
+      			old_footer.middle_crc = footer.middle_crc;
+		} else {
+			old_footer.front_crc = old_footer.middle_crc = 0;
+		}
+    		old_footer.data_crc = pipe->crcflags & MSG_CRC_DATA ? footer.data_crc : 0;
 		old_footer.flags = footer.flags;   
 		msgvec[msg.msg_iovlen].iov_base = (char*)&old_footer;
 		msgvec[msg.msg_iovlen].iov_len = sizeof(old_footer);
@@ -647,6 +695,8 @@ int write_message(Message *m, pipe_t *pipe)
 {
 	int ret;
 
+	m->encode(pipe->features, pipe->crcflags);
+
 	const ceph_msg_header& header = m->get_header();
 	const ceph_msg_footer& footer = m->get_footer();
 
@@ -658,6 +708,86 @@ int write_message(Message *m, pipe_t *pipe)
 	if (rc < 0) {
 		ret = 1;
 		goto err_ret;
+	}
+
+	return 0;
+err_ret:
+	return ret;
+}
+
+int send_latest_osdmap(pipe_t *pipe)
+{
+	int ret;
+
+	//bufferlist bl;
+	//m_config.osdmap->encode(bl, pipe->features);
+	ret = write_message(new MOSDMap(m_config.monmap->fsid), pipe);
+	if (ret) {
+		printf("send lastest osdmap error : %d\n", ret);
+		goto err_ret;
+	}
+
+	printf("send lastest osdmap ok\n");
+	return 0;
+err_ret:
+	return ret;
+}
+
+int send_latest_monmap(pipe_t *pipe)
+{
+	int ret;
+	bufferlist bl;
+	printf("monmap size: %d\n", m_config.monmap->size() );
+	m_config.monmap->encode(bl, pipe->features);
+	ret = write_message(new MMonMap(bl), pipe);
+	if (ret) {
+		printf("send lastest monmap error : %d\n", ret);
+		goto err_ret;
+	}
+
+	printf("send lastest monmap ok\n");
+	return 0;
+err_ret:
+	return ret;
+}
+
+int fetch_msg(Message *m, Message **rsp_m, pipe_t *pipe)
+{
+	int ret = 0;
+	Message *reply;
+  	bufferlist response_bl;
+  	uuid_d fsid;
+
+	//fsid.uuid_d();
+        //	= "4a24c5e6-d7d9-48dd-a7b7-21ce5be9d984";
+
+	printf("fetch msg\n");
+	switch (m->get_type()) {
+    		case MSG_MON_GLOBAL_ID:
+			printf("mon global id\n");
+			break;
+    		case CEPH_MSG_AUTH:
+			printf("exec msg auth\n");
+  			reply = new MAuthReply(CEPH_AUTH_NONE, &response_bl, 0, 94097);
+  			*rsp_m = reply;
+			break;
+    		case CEPH_MSG_MON_SUBSCRIBE:
+			ret = send_latest_monmap(pipe);
+			if (ret){
+				goto err_ret;
+			}
+
+			ret = send_latest_osdmap(pipe);
+			if (ret){
+				goto err_ret;
+			}
+
+			reply = new MMonSubscribeAck(fsid, 24*36000);
+  			*rsp_m = reply;
+			break;
+    		default:
+			printf("fetch msg unknow, come on...\n");
+			break;
 	}
 
 	return 0;
@@ -873,7 +1003,7 @@ void *__reader(void *_arg)
 	ceph_le64 seq;
 	pipe_t pipe;
 
-	pipe = *((pipe_t *)_arg);
+	memcpy(&pipe, (pipe_t *)_arg, sizeof(pipe_t));
 
 	in_seq = 0;
 	out_seq = 0;
@@ -967,10 +1097,10 @@ void *__reader(void *_arg)
       			in_seq = m->get_seq();
 			write_ack(in_seq, accept_sd);
 
-			printf("get message type: %d", m->get_type());
+			printf("get message type: %d\n", m->get_type());
       			Message *rsp_m = 0;
 			//= new Message(m->get_type());
-			ret = fetch_msg(m, &rsp_m);
+			ret = fetch_msg(m, &rsp_m, &pipe);
 			if (ret) {
 				printf("fetch msg error\n");
 				goto err_ret;
@@ -982,6 +1112,7 @@ void *__reader(void *_arg)
 				printf("write message error\n");
 				goto err_ret;
 			}
+			printf("send reply ok\n");
 		} else if (tag == CEPH_MSGR_TAG_CLOSE) {
       			printf("reader got CLOSE\n");
 			goto err_ret;
@@ -996,6 +1127,7 @@ void *__reader(void *_arg)
 
 	return NULL;
 err_ret:
+	free(_arg);
         ::shutdown(accept_sd, SHUT_RDWR);
 	return NULL;
 }
@@ -1049,7 +1181,7 @@ void *__server_start(void *_arg)
 			goto err_ret;
 		}
 
-		pipe2 = (pipe_t *)malloc(sizeof(*arg));
+		pipe2 = (pipe_t *)malloc(sizeof(pipe_t));
 		memcpy(pipe2, pipe, sizeof(pipe_t));
 		pipe2->accept_sd = accept_sd;
 
@@ -1095,7 +1227,7 @@ int mon_start()
 
 	uint64_t supported =
 		CEPH_FEATURE_UID |
-		CEPH_FEATURE_NOSRCADDR |
+		//CEPH_FEATURE_NOSRCADDR |
 		DEPRECATED_CEPH_FEATURE_MONCLOCKCHECK |
 		CEPH_FEATURE_PGID64 |
 		CEPH_FEATURE_MSG_AUTH;
@@ -1105,6 +1237,8 @@ int mon_start()
 	pipe->supported = supported | CEPH_FEATURES_SUPPORTED_DEFAULT;
 	pipe->required = 0;
 	pipe->listen_port = 6789;
+	pipe->timeout = 9000000;
+	pipe->crcflags = MSG_CRC_ALL;
 
 	ret = server_start(pipe);
 	if (ret) {
@@ -1121,15 +1255,75 @@ int osd_start()
 	return 0;
 }
 
+int m_config_init()
+{
+	return 0;
+}
+ 
 int main(int argc, const char **argv) 
 {
 	int ret;
+	string error;
+
+	MonMap monmap;
+  	OSDMap osdmap;
+  	bufferlist monmapbl;
+  	bufferlist osdmapbl;
+#if 0
+	MonitorDBStore *store = new MonitorDBStore("/root/ceph/src/dev/mon.a");
+	bufferlist mapbl;
+	MonMap monmap;
+	int err = obtain_monmap(*store, mapbl);
+	if (err >= 0) {
+		try {
+			monmap.decode(mapbl);
+		} catch (const buffer::error& e) {
+			cerr << "can't decode monmap: " << e.what() << std::endl;
+		}
+	} else {
+		derr << "unable to obtain a monmap: " << cpp_strerror(err) << dendl;
+	}
+	m_config.monmap = &monmap;
+#endif
+	ret = monmapbl.read_file("./monmap", &error);
+	if (ret) {
+		printf("read monmap file error\n");
+		goto err_ret;
+	} else {
+		try {
+			monmap.decode(monmapbl);
+		}
+		catch (const buffer::error &e) {
+			printf("get osdmap error\n");
+			ret = -1;
+			goto err_ret;
+		}
+	}
+	m_config.monmap = &monmap;
+	printf("monmap size: %d, size2: %d\n", monmap.size(), m_config.monmap->size());
+
+	ret = osdmapbl.read_file("./osdmap", &error);
+	if (ret) {
+		printf("read osdmap file error\n");
+		goto err_ret;
+	} else {
+		try {
+			osdmap.decode(osdmapbl);
+		}
+		catch (const buffer::error &e) {
+			printf("get osdmap error\n");
+			ret = -1;
+			goto err_ret;
+		}
+	}
+	m_config.osdmap = &osdmap;
 
 	ret = mon_start();
 	if (ret) {
 		goto err_ret;
 	}
 
+	sleep(24*3600);
 	pthread_exit(NULL);
 
 	return 0;

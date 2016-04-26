@@ -318,8 +318,9 @@ int Pipe::accept()
     ldout(msgr->cct,10) << "accept couldn't write my+peer addr" << dendl;
     goto fail_unlocked;
   }
+  ldout(msgr->cct, -1) << "zz3 write self addr " << addrs.c_str() << " len, " <<  addrs.length() << "" << dendl;
 
-  ldout(msgr->cct,1) << "accept sd=" << sd << " " << socket_addr << dendl;
+  ldout(msgr->cct, -1) << "accept sd=" << sd << " " << socket_addr << dendl;
   
   // identify peer
   if (tcp_read(banner, strlen(CEPH_BANNER)) < 0) {
@@ -331,14 +332,19 @@ int Pipe::accept()
     ldout(msgr->cct,1) << "accept peer sent bad banner '" << banner << "' (should be '" << CEPH_BANNER << "')" << dendl;
     goto fail_unlocked;
   }
+
+   ldout(msgr->cct, -1) << "zz3 accept peer sent bad banner '" << banner << "' (should be '" << CEPH_BANNER << "')" << dendl;
   {
     bufferptr tp(sizeof(peer_addr));
     addrbl.push_back(std::move(tp));
   }
+
   if (tcp_read(addrbl.c_str(), addrbl.length()) < 0) {
     ldout(msgr->cct,10) << "accept couldn't read peer_addr" << dendl;
     goto fail_unlocked;
   }
+
+  ldout(msgr->cct, -1) << "zz3 read perr_addr" << addrbl.c_str() << dendl;
   {
     bufferlist::iterator ti = addrbl.begin();
     ::decode(peer_addr, ti);
@@ -1493,192 +1499,194 @@ void Pipe::stop_and_wait()
  */
 void Pipe::reader()
 {
-  pipe_lock.Lock();
+	pipe_lock.Lock();
 
-  if (state == STATE_ACCEPTING) {
-    accept();
-    assert(pipe_lock.is_locked());
-  }
+	if (state == STATE_ACCEPTING) {
+		accept();
+		assert(pipe_lock.is_locked());
+	}
 
-  // loop.
-  while (state != STATE_CLOSED &&
-	 state != STATE_CONNECTING) {
-    assert(pipe_lock.is_locked());
+	// loop.
+	while (state != STATE_CLOSED &&
+			state != STATE_CONNECTING) {
+		assert(pipe_lock.is_locked());
 
-    // sleep if (re)connecting
-    if (state == STATE_STANDBY) {
-      ldout(msgr->cct,20) << "reader sleeping during reconnect|standby" << dendl;
-      cond.Wait(pipe_lock);
-      continue;
-    }
+		// sleep if (re)connecting
+		if (state == STATE_STANDBY) {
+			ldout(msgr->cct,20) << "reader sleeping during reconnect|standby" << dendl;
+			cond.Wait(pipe_lock);
+			continue;
+		}
 
-    // get a reference to the AuthSessionHandler while we have the pipe_lock
-    ceph::shared_ptr<AuthSessionHandler> auth_handler = session_security;
+		// get a reference to the AuthSessionHandler while we have the pipe_lock
+		ceph::shared_ptr<AuthSessionHandler> auth_handler = session_security;
 
-    pipe_lock.Unlock();
+		pipe_lock.Unlock();
 
-    char tag = -1;
-    ldout(msgr->cct,20) << "reader reading tag..." << dendl;
-    if (tcp_read((char*)&tag, 1) < 0) {
-      pipe_lock.Lock();
-      ldout(msgr->cct,2) << "reader couldn't read tag, " << cpp_strerror(errno) << dendl;
-      fault(true);
-      continue;
-    }
+		char tag = -1;
+		ldout(msgr->cct,20) << "reader reading tag..." << dendl;
+		if (tcp_read((char*)&tag, 1) < 0) {
+			pipe_lock.Lock();
+			ldout(msgr->cct,2) << "reader couldn't read tag, " << cpp_strerror(errno) << dendl;
+			fault(true);
+			continue;
+		}
 
-    if (tag == CEPH_MSGR_TAG_KEEPALIVE) {
-      ldout(msgr->cct,2) << "reader got KEEPALIVE" << dendl;
-      pipe_lock.Lock();
-      connection_state->set_last_keepalive(ceph_clock_now(NULL));
-      continue;
-    }
-    if (tag == CEPH_MSGR_TAG_KEEPALIVE2) {
-      ldout(msgr->cct,30) << "reader got KEEPALIVE2 tag ..." << dendl;
-      ceph_timespec t;
-      int rc = tcp_read((char*)&t, sizeof(t));
-      pipe_lock.Lock();
-      if (rc < 0) {
-	ldout(msgr->cct,2) << "reader couldn't read KEEPALIVE2 stamp "
-			   << cpp_strerror(errno) << dendl;
-	fault(true);
-      } else {
-	send_keepalive_ack = true;
-	keepalive_ack_stamp = utime_t(t);
-	ldout(msgr->cct,2) << "reader got KEEPALIVE2 " << keepalive_ack_stamp
-			   << dendl;
-	connection_state->set_last_keepalive(ceph_clock_now(NULL));
-	cond.Signal();
-      }
-      continue;
-    }
-    if (tag == CEPH_MSGR_TAG_KEEPALIVE2_ACK) {
-      ldout(msgr->cct,2) << "reader got KEEPALIVE_ACK" << dendl;
-      struct ceph_timespec t;
-      int rc = tcp_read((char*)&t, sizeof(t));
-      pipe_lock.Lock();
-      if (rc < 0) {
-	ldout(msgr->cct,2) << "reader couldn't read KEEPALIVE2 stamp " << cpp_strerror(errno) << dendl;
-	fault(true);
-      } else {
-	connection_state->set_last_keepalive_ack(utime_t(t));
-      }
-      continue;
-    }
+		if (tag == CEPH_MSGR_TAG_KEEPALIVE) {
+			ldout(msgr->cct,2) << "reader got KEEPALIVE" << dendl;
+			pipe_lock.Lock();
+			connection_state->set_last_keepalive(ceph_clock_now(NULL));
+			continue;
+		}
+		if (tag == CEPH_MSGR_TAG_KEEPALIVE2) {
+			ldout(msgr->cct,30) << "reader got KEEPALIVE2 tag ..." << dendl;
+			ceph_timespec t;
+			int rc = tcp_read((char*)&t, sizeof(t));
+			pipe_lock.Lock();
+			if (rc < 0) {
+				ldout(msgr->cct,2) << "reader couldn't read KEEPALIVE2 stamp "
+					<< cpp_strerror(errno) << dendl;
+				fault(true);
+			} else {
+				send_keepalive_ack = true;
+				keepalive_ack_stamp = utime_t(t);
+				ldout(msgr->cct,2) << "reader got KEEPALIVE2 " << keepalive_ack_stamp
+					<< dendl;
+				connection_state->set_last_keepalive(ceph_clock_now(NULL));
+				cond.Signal();
+			}
+			continue;
+		}
+		if (tag == CEPH_MSGR_TAG_KEEPALIVE2_ACK) {
+			ldout(msgr->cct,2) << "reader got KEEPALIVE_ACK" << dendl;
+			struct ceph_timespec t;
+			int rc = tcp_read((char*)&t, sizeof(t));
+			pipe_lock.Lock();
+			if (rc < 0) {
+				ldout(msgr->cct,2) << "reader couldn't read KEEPALIVE2 stamp " << cpp_strerror(errno) << dendl;
+				fault(true);
+			} else {
+				connection_state->set_last_keepalive_ack(utime_t(t));
+			}
+			continue;
+		}
 
-    // open ...
-    if (tag == CEPH_MSGR_TAG_ACK) {
-      ldout(msgr->cct,20) << "reader got ACK" << dendl;
-      ceph_le64 seq;
-      int rc = tcp_read((char*)&seq, sizeof(seq));
-      pipe_lock.Lock();
-      if (rc < 0) {
-	ldout(msgr->cct,2) << "reader couldn't read ack seq, " << cpp_strerror(errno) << dendl;
-	fault(true);
-      } else if (state != STATE_CLOSED) {
-        handle_ack(seq);
-      }
-      continue;
-    }
+		// open ...
+		if (tag == CEPH_MSGR_TAG_ACK) {
+			ldout(msgr->cct,20) << "reader got ACK" << dendl;
+			ceph_le64 seq;
+			int rc = tcp_read((char*)&seq, sizeof(seq));
+			pipe_lock.Lock();
+			if (rc < 0) {
+				ldout(msgr->cct,2) << "reader couldn't read ack seq, " << cpp_strerror(errno) << dendl;
+				fault(true);
+			} else if (state != STATE_CLOSED) {
+				handle_ack(seq);
+			}
+			continue;
+		}
 
-    else if (tag == CEPH_MSGR_TAG_MSG) {
-      ldout(msgr->cct,20) << "reader got MSG" << dendl;
-      Message *m = 0;
-      int r = read_message(&m, auth_handler.get());
+		else if (tag == CEPH_MSGR_TAG_MSG) {
+			ldout(msgr->cct,20) << "reader got MSG" << dendl;
+			Message *m = 0;
+			int r = read_message(&m, auth_handler.get());
 
-      pipe_lock.Lock();
-      
-      if (!m) {
-	if (r < 0)
-	  fault(true);
-	continue;
-      }
+			pipe_lock.Lock();
 
-      if (state == STATE_CLOSED ||
-	  state == STATE_CONNECTING) {
-	msgr->dispatch_throttle_release(m->get_dispatch_throttle_size());
-	m->put();
-	continue;
-      }
+			if (!m) {
+				if (r < 0)
+					fault(true);
+				continue;
+			}
 
-      // check received seq#.  if it is old, drop the message.  
-      // note that incoming messages may skip ahead.  this is convenient for the client
-      // side queueing because messages can't be renumbered, but the (kernel) client will
-      // occasionally pull a message out of the sent queue to send elsewhere.  in that case
-      // it doesn't matter if we "got" it or not.
-      if (m->get_seq() <= in_seq) {
-	ldout(msgr->cct,0) << "reader got old message "
-		<< m->get_seq() << " <= " << in_seq << " " << m << " " << *m
-		<< ", discarding" << dendl;
-	msgr->dispatch_throttle_release(m->get_dispatch_throttle_size());
-	m->put();
-	if (connection_state->has_feature(CEPH_FEATURE_RECONNECT_SEQ) &&
-	    msgr->cct->_conf->ms_die_on_old_message)
-	  assert(0 == "old msgs despite reconnect_seq feature");
-	continue;
-      }
-      if (m->get_seq() > in_seq + 1) {
-	ldout(msgr->cct,0) << "reader missed message?  skipped from seq "
-			   << in_seq << " to " << m->get_seq() << dendl;
-	if (msgr->cct->_conf->ms_die_on_skipped_message)
-	  assert(0 == "skipped incoming seq");
-      }
+			if (state == STATE_CLOSED ||
+					state == STATE_CONNECTING) {
+				msgr->dispatch_throttle_release(m->get_dispatch_throttle_size());
+				m->put();
+				continue;
+			}
 
-      m->set_connection(connection_state.get());
+			// check received seq#.  if it is old, drop the message.  
+			// note that incoming messages may skip ahead.  this is convenient for the client
+			// side queueing because messages can't be renumbered, but the (kernel) client will
+			// occasionally pull a message out of the sent queue to send elsewhere.  in that case
+			// it doesn't matter if we "got" it or not.
+			if (m->get_seq() <= in_seq) {
+				ldout(msgr->cct,0) << "reader got old message "
+					<< m->get_seq() << " <= " << in_seq << " " << m << " " << *m
+					<< ", discarding" << dendl;
+				msgr->dispatch_throttle_release(m->get_dispatch_throttle_size());
+				m->put();
+				if (connection_state->has_feature(CEPH_FEATURE_RECONNECT_SEQ) &&
+						msgr->cct->_conf->ms_die_on_old_message)
+					assert(0 == "old msgs despite reconnect_seq feature");
+				continue;
+			}
+			if (m->get_seq() > in_seq + 1) {
+				ldout(msgr->cct,0) << "reader missed message?  skipped from seq "
+					<< in_seq << " to " << m->get_seq() << dendl;
+				if (msgr->cct->_conf->ms_die_on_skipped_message)
+					assert(0 == "skipped incoming seq");
+			}
 
-      // note last received message.
-      in_seq = m->get_seq();
+			lderr(msgr->cct) << "zz2 reader msg: seq:" << m->get_seq() << "type: " << m->get_type() << dendl;
 
-      cond.Signal();  // wake up writer, to ack this
-      
-      ldout(msgr->cct,10) << "reader got message "
-	       << m->get_seq() << " " << m << " " << *m
-	       << dendl;
-      in_q->fast_preprocess(m);
+			m->set_connection(connection_state.get());
 
-      if (delay_thread) {
-        utime_t release;
-        if (rand() % 10000 < msgr->cct->_conf->ms_inject_delay_probability * 10000.0) {
-          release = m->get_recv_stamp();
-          release += msgr->cct->_conf->ms_inject_delay_max * (double)(rand() % 10000) / 10000.0;
-          lsubdout(msgr->cct, ms, 1) << "queue_received will delay until " << release << " on " << m << " " << *m << dendl;
-        }
-        delay_thread->queue(release, m);
-      } else {
-        if (in_q->can_fast_dispatch(m)) {
-	  reader_dispatching = true;
-          pipe_lock.Unlock();
-          in_q->fast_dispatch(m);
-          pipe_lock.Lock();
-	  reader_dispatching = false;
-	  if (state == STATE_CLOSED ||
-	      notify_on_dispatch_done) { // there might be somebody waiting
-	    notify_on_dispatch_done = false;
-	    cond.Signal();
-	  }
-        } else {
-          in_q->enqueue(m, m->get_priority(), conn_id);
-        }
-      }
-    }
-    
-    else if (tag == CEPH_MSGR_TAG_CLOSE) {
-      ldout(msgr->cct,20) << "reader got CLOSE" << dendl;
-      pipe_lock.Lock();
-      if (state == STATE_CLOSING) {
-	state = STATE_CLOSED;
-	state_closed.set(1);
-      } else {
-	state = STATE_CLOSING;
-      }
-      cond.Signal();
-      break;
-    }
-    else {
-      ldout(msgr->cct,0) << "reader bad tag " << (int)tag << dendl;
-      pipe_lock.Lock();
-      fault(true);
-    }
-  }
+			// note last received message.
+			in_seq = m->get_seq();
+
+			cond.Signal();  // wake up writer, to ack this
+
+			ldout(msgr->cct,10) << "reader got message "
+				<< m->get_seq() << " " << m << " " << *m
+				<< dendl;
+			in_q->fast_preprocess(m);
+
+			if (delay_thread) {
+				utime_t release;
+				if (rand() % 10000 < msgr->cct->_conf->ms_inject_delay_probability * 10000.0) {
+					release = m->get_recv_stamp();
+					release += msgr->cct->_conf->ms_inject_delay_max * (double)(rand() % 10000) / 10000.0;
+					lsubdout(msgr->cct, ms, 1) << "queue_received will delay until " << release << " on " << m << " " << *m << dendl;
+				}
+				delay_thread->queue(release, m);
+			} else {
+				if (in_q->can_fast_dispatch(m)) {
+					reader_dispatching = true;
+					pipe_lock.Unlock();
+					in_q->fast_dispatch(m);
+					pipe_lock.Lock();
+					reader_dispatching = false;
+					if (state == STATE_CLOSED ||
+							notify_on_dispatch_done) { // there might be somebody waiting
+						notify_on_dispatch_done = false;
+						cond.Signal();
+					}
+				} else {
+					in_q->enqueue(m, m->get_priority(), conn_id);
+				}
+			}
+		}
+
+		else if (tag == CEPH_MSGR_TAG_CLOSE) {
+			ldout(msgr->cct,20) << "reader got CLOSE" << dendl;
+			pipe_lock.Lock();
+			if (state == STATE_CLOSING) {
+				state = STATE_CLOSED;
+				state_closed.set(1);
+			} else {
+				state = STATE_CLOSING;
+			}
+			cond.Signal();
+			break;
+		}
+		else {
+			ldout(msgr->cct,0) << "reader bad tag " << (int)tag << dendl;
+			pipe_lock.Lock();
+			fault(true);
+		}
+	}
 
  
   // reap?
@@ -1693,166 +1701,170 @@ void Pipe::reader()
  */
 void Pipe::writer()
 {
-  pipe_lock.Lock();
-  while (state != STATE_CLOSED) {// && state != STATE_WAIT) {
-    ldout(msgr->cct,10) << "writer: state = " << get_state_name()
+	pipe_lock.Lock();
+	while (state != STATE_CLOSED) {// && state != STATE_WAIT) {
+		ldout(msgr->cct,10) << "writer: state = " << get_state_name()
 			<< " policy.server=" << policy.server << dendl;
 
-    // standby?
-    if (is_queued() && state == STATE_STANDBY && !policy.server)
-      state = STATE_CONNECTING;
+		// standby?
+		if (is_queued() && state == STATE_STANDBY && !policy.server)
+			state = STATE_CONNECTING;
 
-    // connect?
-    if (state == STATE_CONNECTING) {
-      assert(!policy.server);
-      connect();
-      continue;
-    }
-    
-    if (state == STATE_CLOSING) {
-      // write close tag
-      ldout(msgr->cct,20) << "writer writing CLOSE tag" << dendl;
-      char tag = CEPH_MSGR_TAG_CLOSE;
-      state = STATE_CLOSED;
-      state_closed.set(1);
-      pipe_lock.Unlock();
-      if (sd) {
-	// we can ignore return value, actually; we don't care if this succeeds.
-	int r = ::write(sd, &tag, 1);
-	(void)r;
-      }
-      pipe_lock.Lock();
-      continue;
-    }
+		// connect?
+		if (state == STATE_CONNECTING) {
+			assert(!policy.server);
+			connect();
+			continue;
+		}
 
-    if (state != STATE_CONNECTING && state != STATE_WAIT && state != STATE_STANDBY &&
-	(is_queued() || in_seq > in_seq_acked)) {
+		if (state == STATE_CLOSING) {
+			// write close tag
+			ldout(msgr->cct,20) << "writer writing CLOSE tag" << dendl;
+			char tag = CEPH_MSGR_TAG_CLOSE;
+			state = STATE_CLOSED;
+			state_closed.set(1);
+			pipe_lock.Unlock();
+			if (sd) {
+				// we can ignore return value, actually; we don't care if this succeeds.
+				int r = ::write(sd, &tag, 1);
+				(void)r;
+			}
+			pipe_lock.Lock();
+			continue;
+		}
 
-      // keepalive?
-      if (send_keepalive) {
-	int rc;
-	if (connection_state->has_feature(CEPH_FEATURE_MSGR_KEEPALIVE2)) {
-	  pipe_lock.Unlock();
-	  rc = write_keepalive2(CEPH_MSGR_TAG_KEEPALIVE2,
-				ceph_clock_now(msgr->cct));
-	} else {
-	  pipe_lock.Unlock();
-	  rc = write_keepalive();
+		if (state != STATE_CONNECTING && state != STATE_WAIT && state != STATE_STANDBY &&
+				(is_queued() || in_seq > in_seq_acked)) {
+
+			// keepalive?
+			if (send_keepalive) {
+				int rc;
+				if (connection_state->has_feature(CEPH_FEATURE_MSGR_KEEPALIVE2)) {
+					pipe_lock.Unlock();
+					ldout(msgr->cct, -1) << "reply write keepalive[2], " << dendl;
+					rc = write_keepalive2(CEPH_MSGR_TAG_KEEPALIVE2,
+							ceph_clock_now(msgr->cct));
+				} else {
+					pipe_lock.Unlock();
+					rc = write_keepalive();
+				}
+				pipe_lock.Lock();
+				if (rc < 0) {
+					ldout(msgr->cct,2) << "writer couldn't write keepalive[2], "
+						<< cpp_strerror(errno) << dendl;
+					fault();
+					continue;
+				}
+				send_keepalive = false;
+			}
+			if (send_keepalive_ack) {
+				utime_t t = keepalive_ack_stamp;
+				pipe_lock.Unlock();
+
+				ldout(msgr->cct, -1) << "reply write keepalive ack2 [2], " << dendl;
+				int rc = write_keepalive2(CEPH_MSGR_TAG_KEEPALIVE2_ACK, t);
+				pipe_lock.Lock();
+				if (rc < 0) {
+					ldout(msgr->cct,2) << "writer couldn't write keepalive_ack, " << cpp_strerror(errno) << dendl;
+					fault();
+					continue;
+				}
+				send_keepalive_ack = false;
+			}
+
+			// send ack?
+			if (in_seq > in_seq_acked) {
+				uint64_t send_seq = in_seq;
+				pipe_lock.Unlock();
+				ldout(msgr->cct, -1) << "reply write ack" << dendl;
+				int rc = write_ack(send_seq);
+				pipe_lock.Lock();
+				if (rc < 0) {
+					ldout(msgr->cct,2) << "writer couldn't write ack, " << cpp_strerror(errno) << dendl;
+					fault();
+					continue;
+				}
+				in_seq_acked = send_seq;
+			}
+
+			// grab outgoing message
+			Message *m = _get_next_outgoing();
+			if (m) {
+				m->set_seq(++out_seq);
+				if (!policy.lossy) {
+					// put on sent list
+					sent.push_back(m); 
+					m->get();
+				}
+
+				// associate message with Connection (for benefit of encode_payload)
+				m->set_connection(connection_state.get());
+
+				uint64_t features = connection_state->get_features();
+
+				if (m->empty_payload())
+					ldout(msgr->cct, -1) << "writer encoding " << m->get_seq() << " features " << features
+						<< " " << m << " " << *m << dendl;
+				else
+					ldout(msgr->cct, -1) << "writer half-reencoding " << m->get_seq() << " features " << features
+						<< " " << m << " " << *m << dendl;
+
+				// encode and copy out of *m
+				m->encode(features, msgr->crcflags);
+
+				// prepare everything
+				const ceph_msg_header& header = m->get_header();
+				const ceph_msg_footer& footer = m->get_footer();
+
+				// Now that we have all the crcs calculated, handle the
+				// digital signature for the message, if the pipe has session
+				// security set up.  Some session security options do not
+				// actually calculate and check the signature, but they should
+				// handle the calls to sign_message and check_signature.  PLR
+				if (session_security.get() == NULL) {
+					ldout(msgr->cct, -1) << "writer no session security" << dendl;
+				} else {
+					if (session_security->sign_message(m)) {
+						ldout(msgr->cct, -1) << "writer failed to sign seq # " << header.seq
+							<< "): sig = " << footer.sig << dendl;
+					} else {
+						ldout(msgr->cct, -1) << "writer signed seq # " << header.seq
+							<< "): sig = " << footer.sig << dendl;
+					}
+				}
+
+				bufferlist blist = m->get_payload();
+				blist.append(m->get_middle());
+				blist.append(m->get_data());
+
+				pipe_lock.Unlock();
+
+				ldout(msgr->cct, -1) << "reply writer write_message" << m->get_seq() << " " << m << dendl;
+				int rc = write_message(header, footer, blist);
+
+				pipe_lock.Lock();
+				if (rc < 0) {
+					ldout(msgr->cct,1) << "writer error sending " << m << ", "
+						<< cpp_strerror(errno) << dendl;
+					fault();
+				}
+				m->put();
+			}
+			continue;
+		}
+
+		// wait
+		ldout(msgr->cct,20) << "writer sleeping" << dendl;
+		cond.Wait(pipe_lock);
 	}
-	pipe_lock.Lock();
-	if (rc < 0) {
-	  ldout(msgr->cct,2) << "writer couldn't write keepalive[2], "
-			     << cpp_strerror(errno) << dendl;
-	  fault();
- 	  continue;
+
+	ldout(msgr->cct,20) << "writer finishing" << dendl;
+
+	// reap?
+	writer_running = false;
+	unlock_maybe_reap();
+	ldout(msgr->cct,10) << "writer done" << dendl;
 	}
-	send_keepalive = false;
-      }
-      if (send_keepalive_ack) {
-	utime_t t = keepalive_ack_stamp;
-	pipe_lock.Unlock();
-	int rc = write_keepalive2(CEPH_MSGR_TAG_KEEPALIVE2_ACK, t);
-	pipe_lock.Lock();
-	if (rc < 0) {
-	  ldout(msgr->cct,2) << "writer couldn't write keepalive_ack, " << cpp_strerror(errno) << dendl;
-	  fault();
-	  continue;
-	}
-	send_keepalive_ack = false;
-      }
-
-      // send ack?
-      if (in_seq > in_seq_acked) {
-	uint64_t send_seq = in_seq;
-	pipe_lock.Unlock();
-	int rc = write_ack(send_seq);
-	pipe_lock.Lock();
-	if (rc < 0) {
-	  ldout(msgr->cct,2) << "writer couldn't write ack, " << cpp_strerror(errno) << dendl;
-	  fault();
- 	  continue;
-	}
-	in_seq_acked = send_seq;
-      }
-
-      // grab outgoing message
-      Message *m = _get_next_outgoing();
-      if (m) {
-	m->set_seq(++out_seq);
-	if (!policy.lossy) {
-	  // put on sent list
-	  sent.push_back(m); 
-	  m->get();
-	}
-
-	// associate message with Connection (for benefit of encode_payload)
-	m->set_connection(connection_state.get());
-
-	uint64_t features = connection_state->get_features();
-
-	if (m->empty_payload())
-	  ldout(msgr->cct,20) << "writer encoding " << m->get_seq() << " features " << features
-			      << " " << m << " " << *m << dendl;
-	else
-	  ldout(msgr->cct,20) << "writer half-reencoding " << m->get_seq() << " features " << features
-			      << " " << m << " " << *m << dendl;
-
-	// encode and copy out of *m
-	m->encode(features, msgr->crcflags);
-
-	// prepare everything
-	const ceph_msg_header& header = m->get_header();
-	const ceph_msg_footer& footer = m->get_footer();
-
-	// Now that we have all the crcs calculated, handle the
-	// digital signature for the message, if the pipe has session
-	// security set up.  Some session security options do not
-	// actually calculate and check the signature, but they should
-	// handle the calls to sign_message and check_signature.  PLR
-	if (session_security.get() == NULL) {
-	  ldout(msgr->cct, 20) << "writer no session security" << dendl;
-	} else {
-	  if (session_security->sign_message(m)) {
-	    ldout(msgr->cct, 20) << "writer failed to sign seq # " << header.seq
-				 << "): sig = " << footer.sig << dendl;
-	  } else {
-	    ldout(msgr->cct, 20) << "writer signed seq # " << header.seq
-				 << "): sig = " << footer.sig << dendl;
-	  }
-	}
-
-	bufferlist blist = m->get_payload();
-	blist.append(m->get_middle());
-	blist.append(m->get_data());
-
-        pipe_lock.Unlock();
-
-        ldout(msgr->cct,20) << "writer sending " << m->get_seq() << " " << m << dendl;
-	int rc = write_message(header, footer, blist);
-
-	pipe_lock.Lock();
-	if (rc < 0) {
-          ldout(msgr->cct,1) << "writer error sending " << m << ", "
-		  << cpp_strerror(errno) << dendl;
-	  fault();
-        }
-	m->put();
-      }
-      continue;
-    }
-    
-    // wait
-    ldout(msgr->cct,20) << "writer sleeping" << dendl;
-    cond.Wait(pipe_lock);
-  }
-  
-  ldout(msgr->cct,20) << "writer finishing" << dendl;
-
-  // reap?
-  writer_running = false;
-  unlock_maybe_reap();
-  ldout(msgr->cct,10) << "writer done" << dendl;
-}
 
 void Pipe::unlock_maybe_reap()
 {
@@ -2331,11 +2343,13 @@ int Pipe::write_message(const ceph_msg_header& header, const ceph_msg_footer& fo
   // send envelope
   ceph_msg_header_old oldheader;
   if (connection_state->has_feature(CEPH_FEATURE_NOSRCADDR)) {
+	  ldout(msgr->cct,0) << "zz2 has feature no srcaddr" << dendl;
     msgvec[msg.msg_iovlen].iov_base = (char*)&header;
     msgvec[msg.msg_iovlen].iov_len = sizeof(header);
     msglen += sizeof(header);
     msg.msg_iovlen++;
   } else {
+	  ldout(msgr->cct,0) << "zz2 crc " << dendl;
     memcpy(&oldheader, &header, sizeof(header));
     oldheader.src.name = header.src;
     oldheader.src.addr = connection_state->get_peer_addr();

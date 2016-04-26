@@ -132,7 +132,7 @@ int SimpleMessenger::_send_message(Message *m, Connection *con)
 
   if (!m->get_priority()) m->set_priority(get_default_send_priority());
 
-  ldout(cct,1) << "--> " << con->get_peer_addr()
+  ldout(cct, -1) << "--> " << con->get_peer_addr()
       << " -- " << *m
       << " -- ?+" << m->get_data().length()
       << " " << m << " con " << con

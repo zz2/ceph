@@ -471,6 +471,7 @@ void Client::dump_status(Formatter *f)
 
 int Client::init()
 {
+  printf("--------- init -----------\n");
   timer.init();
   objectcacher->start();
   objecter->init();

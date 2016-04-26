@@ -5088,6 +5088,7 @@ void ::ObjectOperation::scrub_ls(const librados::object_id_t& start_after,
 {
   scrub_ls_arg_t arg = {*interval, 0, start_after, max_to_get};
   do_scrub_ls(this, arg, objects, interval, rval);
+ //fuck	
 }
 
 void ::ObjectOperation::scrub_ls(const librados::object_id_t& start_after,
