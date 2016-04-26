@@ -1533,13 +1533,13 @@ void Pipe::reader()
 		}
 
 		if (tag == CEPH_MSGR_TAG_KEEPALIVE) {
-			ldout(msgr->cct,2) << "reader got KEEPALIVE" << dendl;
+			ldout(msgr->cct, -1) << "reader got KEEPALIVE" << dendl;
 			pipe_lock.Lock();
 			connection_state->set_last_keepalive(ceph_clock_now(NULL));
 			continue;
 		}
 		if (tag == CEPH_MSGR_TAG_KEEPALIVE2) {
-			ldout(msgr->cct,30) << "reader got KEEPALIVE2 tag ..." << dendl;
+			ldout(msgr->cct, -1) << "reader got KEEPALIVE2 tag ..." << dendl;
 			ceph_timespec t;
 			int rc = tcp_read((char*)&t, sizeof(t));
 			pipe_lock.Lock();
@@ -1558,7 +1558,7 @@ void Pipe::reader()
 			continue;
 		}
 		if (tag == CEPH_MSGR_TAG_KEEPALIVE2_ACK) {
-			ldout(msgr->cct,2) << "reader got KEEPALIVE_ACK" << dendl;
+			ldout(msgr->cct, -1) << "reader got KEEPALIVE_ACK" << dendl;
 			struct ceph_timespec t;
 			int rc = tcp_read((char*)&t, sizeof(t));
 			pipe_lock.Lock();
@@ -1573,7 +1573,7 @@ void Pipe::reader()
 
 		// open ...
 		if (tag == CEPH_MSGR_TAG_ACK) {
-			ldout(msgr->cct,20) << "reader got ACK" << dendl;
+			ldout(msgr->cct, -1) << "reader got ACK" << dendl;
 			ceph_le64 seq;
 			int rc = tcp_read((char*)&seq, sizeof(seq));
 			pipe_lock.Lock();
@@ -1587,10 +1587,9 @@ void Pipe::reader()
 		}
 
 		else if (tag == CEPH_MSGR_TAG_MSG) {
-			ldout(msgr->cct,20) << "reader got MSG" << dendl;
 			Message *m = 0;
 			int r = read_message(&m, auth_handler.get());
-
+			ldout(msgr->cct, -1) << "reader got MSG " << m->get_seq() << " type " << m->get_type() << dendl;
 			pipe_lock.Lock();
 
 			if (!m) {
@@ -1670,7 +1669,7 @@ void Pipe::reader()
 		}
 
 		else if (tag == CEPH_MSGR_TAG_CLOSE) {
-			ldout(msgr->cct,20) << "reader got CLOSE" << dendl;
+			ldout(msgr->cct, -1) << "reader got CLOSE" << dendl;
 			pipe_lock.Lock();
 			if (state == STATE_CLOSING) {
 				state = STATE_CLOSED;
@@ -1682,7 +1681,7 @@ void Pipe::reader()
 			break;
 		}
 		else {
-			ldout(msgr->cct,0) << "reader bad tag " << (int)tag << dendl;
+			ldout(msgr->cct, -1) << "reader got bad tag " << (int)tag << dendl;
 			pipe_lock.Lock();
 			fault(true);
 		}
@@ -1741,7 +1740,7 @@ void Pipe::writer()
 				int rc;
 				if (connection_state->has_feature(CEPH_FEATURE_MSGR_KEEPALIVE2)) {
 					pipe_lock.Unlock();
-					ldout(msgr->cct, -1) << "reply write keepalive[2], " << dendl;
+					ldout(msgr->cct, -1) << "write reply keepalive[2], " << dendl;
 					rc = write_keepalive2(CEPH_MSGR_TAG_KEEPALIVE2,
 							ceph_clock_now(msgr->cct));
 				} else {
@@ -1761,7 +1760,7 @@ void Pipe::writer()
 				utime_t t = keepalive_ack_stamp;
 				pipe_lock.Unlock();
 
-				ldout(msgr->cct, -1) << "reply write keepalive ack2 [2], " << dendl;
+				ldout(msgr->cct, -1) << "write reply keepalive ack2 [2], " << dendl;
 				int rc = write_keepalive2(CEPH_MSGR_TAG_KEEPALIVE2_ACK, t);
 				pipe_lock.Lock();
 				if (rc < 0) {
@@ -1776,7 +1775,7 @@ void Pipe::writer()
 			if (in_seq > in_seq_acked) {
 				uint64_t send_seq = in_seq;
 				pipe_lock.Unlock();
-				ldout(msgr->cct, -1) << "reply write ack" << dendl;
+				ldout(msgr->cct, -1) << "write reply ack" << dendl;
 				int rc = write_ack(send_seq);
 				pipe_lock.Lock();
 				if (rc < 0) {
@@ -1839,7 +1838,7 @@ void Pipe::writer()
 
 				pipe_lock.Unlock();
 
-				ldout(msgr->cct, -1) << "reply writer write_message" << m->get_seq() << " " << m << dendl;
+				ldout(msgr->cct, -1) << "write reply write_message " << m->get_seq() << " type " << m->get_type() << dendl;
 				int rc = write_message(header, footer, blist);
 
 				pipe_lock.Lock();
